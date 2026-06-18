@@ -1,18 +1,30 @@
-/* Mail Merge Engine v1.0.1
+/* Mail Merge Engine v1.0.3
  * Auth: Office.js SSO -> Microsoft Graph API
  * Batching: 20 requests per Graph $batch call
  * Security: Zero data stored server-side. All processing in browser RAM.
  */
 
 const GRAPH_BATCH_URL = "https://graph.microsoft.com/v1.0/$batch";
+const GRAPH_MAILBOX_URL = "https://graph.microsoft.com/v1.0/me/mailboxSettings";
 const BATCH_SIZE = 20;
 const BATCH_DELAY_MS = 1500;
+const MAX_RETRIES = 3;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_RECIPIENTS = 10000;
+const MAX_PAYLOAD_BYTES = 3.5 * 1024 * 1024; // warn at 3.5 MB (hard limit is 4 MB)
+
+const LS_KEY_SUBJECT = "mailmerge_subject";
+const LS_KEY_CSV = "mailmerge_csv";
+const LS_KEY_TAGS = "mailmerge_custom_tags";
+
+// Default tags always shown in the tag bar
+const DEFAULT_TAGS = ["{{first_name}}", "{{last_name}}", "{{email}}", "{{company}}", "{{title}}"];
 
 let parsedRecipients = [];
 let csvHeaders = [];
 let mergeRunning = false;
 let cancelRequested = false;
+let subjectHasFocus = false;
 
 Office.onReady((info) => {
   if (info.host === Office.HostType.Outlook) {
@@ -25,12 +37,38 @@ Office.onReady((info) => {
     document.getElementById("addCustomTagBtn").addEventListener("click", addCustomTag);
     document.getElementById("confirmSendBtn").addEventListener("click", confirmSend);
     document.getElementById("confirmCancelBtn").addEventListener("click", dismissModal);
+    document.getElementById("uploadCsvBtn").addEventListener("click", () => {
+      document.getElementById("csvFileInput").click();
+    });
+    document.getElementById("csvFileInput").addEventListener("change", handleCsvFileUpload);
+
+    // Track subject focus so tag clicks know where to insert
+    const subjectInput = document.getElementById("subjectInput");
+    subjectInput.addEventListener("focus", () => { subjectHasFocus = true; });
+    subjectInput.addEventListener("blur", () => { subjectHasFocus = false; });
 
     // Tag bar: delegate clicks to tag spans
     document.getElementById("tagBar").addEventListener("click", (e) => {
       const tag = e.target.dataset.tag;
       if (tag) insertTag(tag);
     });
+
+    // Allow Enter key in custom tag input
+    document.getElementById("customTagInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") addCustomTag();
+    });
+
+    // Persist subject changes
+    document.getElementById("subjectInput").addEventListener("input", () => {
+      localStorage.setItem(LS_KEY_SUBJECT, document.getElementById("subjectInput").value);
+    });
+
+    // Persist CSV textarea changes
+    document.getElementById("csvInput").addEventListener("input", () => {
+      localStorage.setItem(LS_KEY_CSV, document.getElementById("csvInput").value);
+    });
+
+    restoreLocalState();
   }
 });
 
@@ -51,20 +89,61 @@ function clearLog() {
   log("Log cleared.", "info");
 }
 
+/* ─── LOCAL STATE PERSISTENCE ─────────────────────────────────── */
+
+function restoreLocalState() {
+  const savedSubject = localStorage.getItem(LS_KEY_SUBJECT);
+  if (savedSubject) {
+    document.getElementById("subjectInput").value = savedSubject;
+    log("Restored subject from saved session.", "info");
+  }
+
+  const savedCsv = localStorage.getItem(LS_KEY_CSV);
+  if (savedCsv) {
+    document.getElementById("csvInput").value = savedCsv;
+    log("Restored CSV data from saved session.", "info");
+    parseAndPreview();
+  }
+
+  const savedTags = JSON.parse(localStorage.getItem(LS_KEY_TAGS) || "[]");
+  savedTags.forEach(tag => addTagToBar(tag));
+}
+
+function saveCustomTagsToStorage() {
+  const tagEls = document.querySelectorAll("#tagBar [data-tag]");
+  const tags = Array.from(tagEls)
+    .map(el => el.dataset.tag)
+    .filter(t => !DEFAULT_TAGS.includes(t));
+  localStorage.setItem(LS_KEY_TAGS, JSON.stringify(tags));
+}
+
 /* ─── TAG INSERTION ────────────────────────────────────────────── */
 
 function insertTag(tag) {
-  Office.context.mailbox.item.body.setSelectedDataAsync(
-    tag,
-    { coercionType: Office.CoercionType.Html },
-    (result) => {
-      if (result.status !== Office.AsyncResultStatus.Succeeded) {
-        log(`Failed to insert tag: ${tag}`, "error");
-      } else {
-        log(`Inserted tag: ${tag}`, "success");
+  if (subjectHasFocus) {
+    // Insert at cursor position in the subject text input
+    const input = document.getElementById("subjectInput");
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const value = input.value;
+    input.value = value.slice(0, start) + tag + value.slice(end);
+    const newCursor = start + tag.length;
+    input.setSelectionRange(newCursor, newCursor);
+    input.focus();
+    log(`Inserted tag into subject: ${tag}`, "success");
+  } else {
+    Office.context.mailbox.item.body.setSelectedDataAsync(
+      tag,
+      { coercionType: Office.CoercionType.Html },
+      (result) => {
+        if (result.status !== Office.AsyncResultStatus.Succeeded) {
+          log(`Failed to insert tag: ${tag}`, "error");
+        } else {
+          log(`Inserted tag into body: ${tag}`, "success");
+        }
       }
-    }
-  );
+    );
+  }
 }
 
 function addCustomTag() {
@@ -74,20 +153,42 @@ function addCustomTag() {
 
   const normalized = name.toLowerCase().replace(/\s+/g, "_");
   const tag = `{{${normalized}}}`;
-
-  // Avoid duplicates
-  const existing = document.querySelector(`#tagBar [data-tag="${tag}"]`);
-  if (!existing) {
-    const bar = document.getElementById("tagBar");
-    const newTag = document.createElement("span");
-    newTag.className = "tag";
-    newTag.dataset.tag = tag;
-    newTag.textContent = tag;
-    bar.appendChild(newTag);
-  }
-
+  addTagToBar(tag);
   insertTag(tag);
   input.value = "";
+}
+
+function addTagToBar(tag) {
+  const existing = document.querySelector(`#tagBar [data-tag="${CSS.escape(tag)}"]`);
+  if (existing) return;
+  const bar = document.getElementById("tagBar");
+  const newTag = document.createElement("span");
+  newTag.className = "tag";
+  newTag.dataset.tag = tag;
+  newTag.textContent = tag;
+  bar.appendChild(newTag);
+  saveCustomTagsToStorage();
+}
+
+/* ─── CSV FILE UPLOAD ──────────────────────────────────────────── */
+
+function handleCsvFileUpload(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    document.getElementById("csvInput").value = event.target.result;
+    log(`Loaded file: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`, "info");
+    parseAndPreview();
+  };
+  reader.onerror = () => {
+    log(`Failed to read file: ${file.name}`, "error");
+  };
+  reader.readAsText(file);
+
+  // Reset so the same file can be re-loaded if needed
+  e.target.value = "";
 }
 
 /* ─── CSV PARSING (RFC 4180) ───────────────────────────────────── */
@@ -159,8 +260,22 @@ function parseAndPreview() {
     return;
   }
 
+  if (rows.length > MAX_RECIPIENTS) {
+    log(`🛑 CSV contains ${rows.length.toLocaleString()} rows — exceeds the Microsoft 365 hard limit of 10,000 outbound recipients per 24 hours. Trim your list before sending to avoid a corporate outbox lockout.`, "error");
+    document.getElementById("recipientCount").textContent = `${rows.length.toLocaleString()} recipients — OVER LIMIT`;
+    return;
+  }
+
   csvHeaders = headers;
   parsedRecipients = rows;
+
+  // Auto-populate tag bar with any new headers from this CSV
+  headers.forEach(h => {
+    const tag = `{{${h}}}`;
+    if (!DEFAULT_TAGS.includes(tag)) {
+      addTagToBar(tag);
+    }
+  });
 
   const countEl = document.getElementById("recipientCount");
   countEl.textContent = `${rows.length} recipient${rows.length !== 1 ? "s" : ""} loaded`;
@@ -194,6 +309,11 @@ function personalize(template, recipient) {
     result = result.replace(regex, escapeHtml(recipient[key]));
   });
   return result;
+}
+
+function findUnresolvedTokens(text) {
+  const matches = text.match(/\{\{[^}]+\}\}/g);
+  return matches ? [...new Set(matches)] : [];
 }
 
 function escapeHtml(str) {
@@ -237,9 +357,27 @@ function getAccessToken() {
   });
 }
 
+/* ─── PRE-FLIGHT CHECKS ────────────────────────────────────────── */
+
+async function checkMailboxReady(token) {
+  const response = await fetch(GRAPH_MAILBOX_URL, {
+    headers: { "Authorization": `Bearer ${token}` }
+  });
+  if (!response.ok) {
+    throw new Error(`Mailbox pre-flight failed (${response.status}). The account may be unprovisioned or undergoing migration.`);
+  }
+}
+
+function checkPayloadSize(bodyTemplate) {
+  const bytes = new TextEncoder().encode(bodyTemplate).length;
+  if (bytes > MAX_PAYLOAD_BYTES) {
+    log(`⚠️ Email body is ~${(bytes / 1024 / 1024).toFixed(2)} MB — dangerously close to the 4 MB Graph API per-message limit. Compress or remove inline images before sending.`, "warning");
+  }
+}
+
 /* ─── GRAPH BATCH SEND ─────────────────────────────────────────── */
 
-function buildEmailRequest(id, toEmail, subject, htmlBody) {
+function buildEmailRequest(id, toEmail, subject, htmlBody, saveToSent) {
   return {
     id: String(id),
     method: "POST",
@@ -251,7 +389,7 @@ function buildEmailRequest(id, toEmail, subject, htmlBody) {
         body: { contentType: "HTML", content: htmlBody },
         toRecipients: [{ emailAddress: { address: toEmail } }]
       },
-      saveToSentItems: true
+      saveToSentItems: saveToSent
     }
   };
 }
@@ -268,21 +406,54 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function sendBatch(requests, token) {
-  const response = await fetch(GRAPH_BATCH_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ requests })
-  });
+async function sendBatchWithRetry(requests, token) {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const response = await fetch(GRAPH_BATCH_URL, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ requests })
+    });
 
-  if (!response.ok) {
-    throw new Error(`Batch HTTP error: ${response.status} ${response.statusText}`);
+    // Top-level 429: the entire batch request was throttled
+    if (response.status === 429) {
+      const retryAfter = parseInt(response.headers.get("Retry-After") || "10", 10);
+      if (attempt < MAX_RETRIES) {
+        log(`Rate limited (429). Retrying batch in ${retryAfter}s (attempt ${attempt}/${MAX_RETRIES})...`, "warning");
+        await delay(retryAfter * 1000);
+        continue;
+      } else {
+        throw new Error(`Rate limited after ${MAX_RETRIES} retries.`);
+      }
+    }
+
+    if (!response.ok) {
+      throw new Error(`Batch HTTP error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    const responses = data.responses || [];
+
+    // Check for per-request 429s and retry those individual requests
+    const throttled = responses.filter(r => r.status === 429);
+    if (throttled.length > 0 && attempt < MAX_RETRIES) {
+      const retryAfterHeader = throttled
+        .map(r => parseInt((r.headers || {})["Retry-After"] || "10", 10))
+        .reduce((a, b) => Math.max(a, b), 10);
+      const throttledIds = new Set(throttled.map(r => r.id));
+      const retryRequests = requests.filter(r => throttledIds.has(r.id));
+      log(`${throttled.length} request(s) throttled. Retrying in ${retryAfterHeader}s (attempt ${attempt}/${MAX_RETRIES})...`, "warning");
+      await delay(retryAfterHeader * 1000);
+      // Merge successful responses with retried ones
+      const okResponses = responses.filter(r => r.status !== 429);
+      const retryResult = await sendBatchWithRetry(retryRequests, token);
+      return { responses: [...okResponses, ...(retryResult.responses || [])] };
+    }
+
+    return data;
   }
-
-  return await response.json();
 }
 
 /* ─── CONFIRMATION MODAL ───────────────────────────────────────── */
@@ -382,7 +553,32 @@ async function handleMergeClick() {
     return;
   }
 
-  // 6. Run merge
+  // 6. Payload size pre-flight
+  checkPayloadSize(emailBodyTemplate);
+
+  // 7. Mailbox provisioning pre-flight
+  let preflightToken;
+  try {
+    preflightToken = await getAccessToken();
+    await checkMailboxReady(preflightToken);
+    log("Mailbox pre-flight OK.", "info");
+  } catch (err) {
+    log(`Pre-flight error: ${err.message}`, "error");
+    return;
+  }
+
+  // 8. Check for unresolved tokens on the first recipient as a representative sample
+  const sampleSubject = personalize(subjectTemplate, valid[0]);
+  const sampleBody = personalize(emailBodyTemplate, valid[0]);
+  const unresolvedSubject = findUnresolvedTokens(sampleSubject);
+  const unresolvedBody = findUnresolvedTokens(sampleBody);
+  const allUnresolved = [...new Set([...unresolvedSubject, ...unresolvedBody])];
+  if (allUnresolved.length > 0) {
+    log(`Warning: unresolved token(s) found — these will be sent literally: ${allUnresolved.join(", ")}`, "warning");
+  }
+
+  // 9. Run merge
+  const saveToSent = document.getElementById("saveToSentItems").checked;
   setMergeRunning(true);
   cancelRequested = false;
   log("Starting mail merge...", "info");
@@ -390,7 +586,7 @@ async function handleMergeClick() {
   const requests = valid.map((recipient, idx) => {
     const personalizedSubject = personalize(subjectTemplate, recipient);
     const personalizedBody = personalize(emailBodyTemplate, recipient);
-    return buildEmailRequest(idx + 1, recipient.email, personalizedSubject, personalizedBody);
+    return buildEmailRequest(idx + 1, recipient.email, personalizedSubject, personalizedBody, saveToSent);
   });
 
   const batches = chunkArray(requests, BATCH_SIZE);
@@ -420,7 +616,7 @@ async function handleMergeClick() {
     }
 
     try {
-      const result = await sendBatch(batch, token);
+      const result = await sendBatchWithRetry(batch, token);
       const responses = result.responses || [];
 
       responses.forEach(r => {

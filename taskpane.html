@@ -17,13 +17,13 @@
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js?v=1.0.0" type="text/javascript"></script>
 
   <!-- App styles — cache busted via version param -->
-  <link rel="stylesheet" href="taskpane.css?v=1.0.1" />
+  <link rel="stylesheet" href="taskpane.css?v=1.0.3" />
 </head>
 <body>
   <div class="header">
     <span class="header-icon">✉</span>
     <span class="header-title">Mail Merge</span>
-    <span class="header-version">v1.0.1</span>
+    <span class="header-version">v1.0.2</span>
   </div>
 
   <div class="section">
@@ -47,12 +47,17 @@
         placeholder="custom_field_name" />
       <button class="btn-secondary" id="addCustomTagBtn">+ Add tag</button>
     </div>
-    <p class="hint">Click a tag to insert it into the email body at cursor position.</p>
+    <p class="hint">Click a tag to insert it. If the subject line is focused, the tag goes there; otherwise it goes into the email body.</p>
   </div>
 
   <div class="section">
     <label class="label">Recipients <span class="hint-inline">(CSV format)</span></label>
     <p class="hint">First row = column headers. Must include an <code>email</code> column.</p>
+    <div class="csv-upload-row">
+      <button class="btn-secondary" id="uploadCsvBtn">📂 Load CSV file</button>
+      <input type="file" id="csvFileInput" accept=".csv,text/csv" class="hidden" />
+      <span class="hint-inline">or paste below</span>
+    </div>
     <textarea id="csvInput" class="csv-area"
       placeholder="email,first_name,last_name,company,title&#10;john@example.com,John,Smith,Acme,Manager&#10;sara@example.com,Sara,Jones,Globex,Director"></textarea>
     <div class="csv-actions">
@@ -64,6 +69,12 @@
   <div id="previewTable" class="section hidden"></div>
 
   <div class="section">
+    <div class="send-options">
+      <label class="checkbox-label">
+        <input type="checkbox" id="saveToSentItems" checked />
+        Save sent emails to Sent Items
+      </label>
+    </div>
     <div class="merge-actions">
       <button id="mergeBtn" class="btn-primary">▶ Run mail merge</button>
       <button id="stopBtn" class="btn-danger hidden">⏹ Stop</button>
@@ -95,6 +106,6 @@
   </div>
 
   <!-- Core engine — cache busted via version param -->
-  <script src="taskpane.js?v=1.0.1" type="text/javascript"></script>
+  <script src="taskpane.js?v=1.0.2" type="text/javascript"></script>
 </body>
 </html>
