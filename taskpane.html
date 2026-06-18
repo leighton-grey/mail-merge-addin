@@ -17,13 +17,13 @@
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js?v=1.0.0" type="text/javascript"></script>
 
   <!-- App styles — cache busted via version param -->
-  <link rel="stylesheet" href="taskpane.css?v=1.0.0" />
+  <link rel="stylesheet" href="taskpane.css?v=1.0.1" />
 </head>
 <body>
   <div class="header">
     <span class="header-icon">✉</span>
     <span class="header-title">Mail Merge</span>
-    <span class="header-version">v1.0.0</span>
+    <span class="header-version">v1.0.1</span>
   </div>
 
   <div class="section">
@@ -36,12 +36,16 @@
   <div class="section">
     <label class="label">Insert field tag</label>
     <div id="tagBar" class="tag-bar">
-      <span class="tag" onclick="insertTag('{{first_name}}')">{{first_name}}</span>
-      <span class="tag" onclick="insertTag('{{last_name}}')">{{last_name}}</span>
-      <span class="tag" onclick="insertTag('{{email}}')">{{email}}</span>
-      <span class="tag" onclick="insertTag('{{company}}')">{{company}}</span>
-      <span class="tag" onclick="insertTag('{{title}}')">{{title}}</span>
-      <span class="tag tag-custom" onclick="promptCustomTag()">+ custom</span>
+      <span class="tag" data-tag="{{first_name}}">{{first_name}}</span>
+      <span class="tag" data-tag="{{last_name}}">{{last_name}}</span>
+      <span class="tag" data-tag="{{email}}">{{email}}</span>
+      <span class="tag" data-tag="{{company}}">{{company}}</span>
+      <span class="tag" data-tag="{{title}}">{{title}}</span>
+    </div>
+    <div class="custom-tag-row">
+      <input type="text" id="customTagInput" class="input input-inline"
+        placeholder="custom_field_name" />
+      <button class="btn-secondary" id="addCustomTagBtn">+ Add tag</button>
     </div>
     <p class="hint">Click a tag to insert it into the email body at cursor position.</p>
   </div>
@@ -52,7 +56,7 @@
     <textarea id="csvInput" class="csv-area"
       placeholder="email,first_name,last_name,company,title&#10;john@example.com,John,Smith,Acme,Manager&#10;sara@example.com,Sara,Jones,Globex,Director"></textarea>
     <div class="csv-actions">
-      <button class="btn-secondary" onclick="parseAndPreview()">Preview recipients</button>
+      <button class="btn-secondary" id="previewBtn">Preview recipients</button>
       <span id="recipientCount" class="count-badge"></span>
     </div>
   </div>
@@ -60,9 +64,10 @@
   <div id="previewTable" class="section hidden"></div>
 
   <div class="section">
-    <button id="mergeBtn" class="btn-primary" onclick="runMerge()">
-      ▶ Run mail merge
-    </button>
+    <div class="merge-actions">
+      <button id="mergeBtn" class="btn-primary">▶ Run mail merge</button>
+      <button id="stopBtn" class="btn-danger hidden">⏹ Stop</button>
+    </div>
   </div>
 
   <div class="section">
@@ -70,7 +75,19 @@
     <div id="statusLog" class="status-log">
       <p class="log-entry log-info">Ready. Paste your CSV data and click "Run mail merge".</p>
     </div>
-    <button class="btn-secondary" onclick="clearLog()" style="margin-top:6px;">Clear log</button>
+    <button class="btn-secondary" id="clearLogBtn" style="margin-top:6px;">Clear log</button>
+  </div>
+
+  <!-- Confirmation modal -->
+  <div id="confirmModal" class="modal-overlay hidden">
+    <div class="modal">
+      <p class="modal-title">Ready to send?</p>
+      <p id="confirmText" class="modal-body"></p>
+      <div class="modal-actions">
+        <button id="confirmSendBtn" class="btn-primary">Send</button>
+        <button id="confirmCancelBtn" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
   </div>
 
   <div class="footer">
@@ -78,6 +95,6 @@
   </div>
 
   <!-- Core engine — cache busted via version param -->
-  <script src="taskpane.js?v=1.0.0" type="text/javascript"></script>
+  <script src="taskpane.js?v=1.0.1" type="text/javascript"></script>
 </body>
 </html>
