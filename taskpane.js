@@ -1,11 +1,10 @@
 /* Mail Merge Engine v1.0.3
  * Auth: Office.js SSO -> Microsoft Graph API
  * Batching: 20 requests per Graph $batch call
- * Security: Zero data stored server-side. All processing in browser RAM.
+ * Privacy: Subject + CSV cached in browser localStorage only. Nothing stored server-side.
  */
 
 const GRAPH_BATCH_URL = "https://graph.microsoft.com/v1.0/$batch";
-const GRAPH_MAILBOX_URL = "https://graph.microsoft.com/v1.0/me/mailboxSettings";
 const BATCH_SIZE = 20;
 const BATCH_DELAY_MS = 1500;
 const MAX_RETRIES = 3;
@@ -21,8 +20,6 @@ const LS_KEY_TAGS = "mailmerge_custom_tags";
 const DEFAULT_TAGS = ["{{first_name}}", "{{last_name}}", "{{email}}", "{{company}}", "{{title}}"];
 
 let parsedRecipients = [];
-let csvHeaders = [];
-let mergeRunning = false;
 let cancelRequested = false;
 let subjectHasFocus = false;
 
@@ -60,12 +57,12 @@ Office.onReady((info) => {
 
     // Persist subject changes
     document.getElementById("subjectInput").addEventListener("input", () => {
-      localStorage.setItem(LS_KEY_SUBJECT, document.getElementById("subjectInput").value);
+      lsSet(LS_KEY_SUBJECT, document.getElementById("subjectInput").value);
     });
 
     // Persist CSV textarea changes
     document.getElementById("csvInput").addEventListener("input", () => {
-      localStorage.setItem(LS_KEY_CSV, document.getElementById("csvInput").value);
+      lsSet(LS_KEY_CSV, document.getElementById("csvInput").value);
     });
 
     restoreLocalState();
@@ -91,21 +88,33 @@ function clearLog() {
 
 /* ─── LOCAL STATE PERSISTENCE ─────────────────────────────────── */
 
+function lsGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function lsSet(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* quota exceeded or restricted webview — ignore */ }
+}
+
+function lsRemove(key) {
+  try { localStorage.removeItem(key); } catch { /* ignore */ }
+}
+
 function restoreLocalState() {
-  const savedSubject = localStorage.getItem(LS_KEY_SUBJECT);
+  const savedSubject = lsGet(LS_KEY_SUBJECT);
   if (savedSubject) {
     document.getElementById("subjectInput").value = savedSubject;
     log("Restored subject from saved session.", "info");
   }
 
-  const savedCsv = localStorage.getItem(LS_KEY_CSV);
+  const savedCsv = lsGet(LS_KEY_CSV);
   if (savedCsv) {
     document.getElementById("csvInput").value = savedCsv;
     log("Restored CSV data from saved session.", "info");
     parseAndPreview();
   }
 
-  const savedTags = JSON.parse(localStorage.getItem(LS_KEY_TAGS) || "[]");
+  const savedTags = JSON.parse(lsGet(LS_KEY_TAGS) || "[]");
   savedTags.forEach(tag => addTagToBar(tag));
 }
 
@@ -114,7 +123,7 @@ function saveCustomTagsToStorage() {
   const tags = Array.from(tagEls)
     .map(el => el.dataset.tag)
     .filter(t => !DEFAULT_TAGS.includes(t));
-  localStorage.setItem(LS_KEY_TAGS, JSON.stringify(tags));
+  lsSet(LS_KEY_TAGS, JSON.stringify(tags));
 }
 
 /* ─── TAG INSERTION ────────────────────────────────────────────── */
@@ -234,7 +243,7 @@ function parseCSVLine(line) {
 }
 
 function parseCSV(raw) {
-  const lines = raw.trim().split("\n").filter(l => l.trim());
+  const lines = raw.trim().replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").filter(l => l.trim());
   if (lines.length < 2) return { headers: [], rows: [] };
 
   const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase());
@@ -266,7 +275,6 @@ function parseAndPreview() {
     return;
   }
 
-  csvHeaders = headers;
   parsedRecipients = rows;
 
   // Auto-populate tag bar with any new headers from this CSV
@@ -342,6 +350,55 @@ function validateRecipients(recipients) {
 
 /* ─── AUTH ─────────────────────────────────────────────────────── */
 
+/**
+ * Maps Office.js SSO error codes to actionable messages.
+ * Codes reference: https://learn.microsoft.com/office/dev/add-ins/develop/troubleshoot-sso-in-office-add-ins
+ */
+function ssoErrorMessage(code) {
+  switch (code) {
+    case 13001:
+      return "You are not signed in to a Microsoft 365 account in Outlook. " +
+             "Please sign in (File → Office Account) and try again. " +
+             "Note: sign in with your M365 email address, not your JumpCloud credentials.";
+    case 13002:
+      return "Authentication was cancelled or access was denied. Please try again.";
+    case 13003:
+      return "Personal Microsoft accounts (Outlook.com / Hotmail) are not supported. " +
+             "This add-in requires a Microsoft 365 work or school account.";
+    case 13004:
+    case 13005:
+      return "Add-in configuration error — the Entra app registration may be " +
+             "misconfigured or the admin consent URL is wrong. " +
+             "Contact your IT administrator and reference SSO error " + code + ".";
+    case 13006:
+      return "An error occurred in Office. Please save your work, restart Outlook, and try again.";
+    case 13007:
+      return "Office could not obtain an access token. " +
+             "Try signing out of Office and back in, then retry.";
+    case 13008:
+      return "Your organisation's policies prevented the consent prompt from appearing. " +
+             "An administrator must grant the Mail.Send permission for this add-in in Entra ID.";
+    case 13009:
+      return "Admin consent is required before this add-in can send email. " +
+             "Your Microsoft 365 administrator must grant the Mail.Send permission. " +
+             "Ask them to visit: " +
+             "https://login.microsoftonline.com/common/adminconsent" +
+             "?client_id=a3a648da-9dc0-48ce-948a-ba2434afcadd";
+    case 13010:
+      return "A navigation error occurred in the sign-in flow. " +
+             "Please try again. If the problem persists, try a different browser or update Edge.";
+    case 13012:
+      return "Single sign-on is not supported in this version of Outlook. " +
+             "Please update Office to the latest version and try again.";
+    case 13013:
+      return "Too many authentication requests. Please wait a moment and try again.";
+    default:
+      return `Authentication failed (code ${code}). ` +
+             "Please restart Outlook and try again. " +
+             "If the problem persists, contact your IT administrator.";
+  }
+}
+
 function getAccessToken() {
   return new Promise((resolve, reject) => {
     Office.context.auth.getAccessTokenAsync(
@@ -350,7 +407,8 @@ function getAccessToken() {
         if (result.status === Office.AsyncResultStatus.Succeeded) {
           resolve(result.value);
         } else {
-          reject(new Error(`Auth failed: ${result.error.message}`));
+          const code = result.error.code;
+          reject(new Error(ssoErrorMessage(code)));
         }
       }
     );
@@ -358,15 +416,6 @@ function getAccessToken() {
 }
 
 /* ─── PRE-FLIGHT CHECKS ────────────────────────────────────────── */
-
-async function checkMailboxReady(token) {
-  const response = await fetch(GRAPH_MAILBOX_URL, {
-    headers: { "Authorization": `Bearer ${token}` }
-  });
-  if (!response.ok) {
-    throw new Error(`Mailbox pre-flight failed (${response.status}). The account may be unprovisioned or undergoing migration.`);
-  }
-}
 
 function checkPayloadSize(bodyTemplate) {
   const bytes = new TextEncoder().encode(bodyTemplate).length;
@@ -454,6 +503,8 @@ async function sendBatchWithRetry(requests, token) {
 
     return data;
   }
+  // Should be unreachable, but guards against a silent undefined return
+  throw new Error("sendBatchWithRetry exhausted all attempts without resolving.");
 }
 
 /* ─── CONFIRMATION MODAL ───────────────────────────────────────── */
@@ -470,14 +521,17 @@ function showConfirmModal(count) {
 }
 
 function confirmSend() {
-  dismissModal();
-  if (pendingMergeResolve) pendingMergeResolve(true);
+  const resolve = pendingMergeResolve;
+  pendingMergeResolve = null;
+  document.getElementById("confirmModal").classList.add("hidden");
+  if (resolve) resolve(true);
 }
 
 function dismissModal() {
-  document.getElementById("confirmModal").classList.add("hidden");
-  if (pendingMergeResolve) pendingMergeResolve(false);
+  const resolve = pendingMergeResolve;
   pendingMergeResolve = null;
+  document.getElementById("confirmModal").classList.add("hidden");
+  if (resolve) resolve(false);
 }
 
 /* ─── CANCEL ───────────────────────────────────────────────────── */
@@ -489,7 +543,6 @@ function handleStop() {
 }
 
 function setMergeRunning(running) {
-  mergeRunning = running;
   const mergeBtn = document.getElementById("mergeBtn");
   const stopBtn = document.getElementById("stopBtn");
   mergeBtn.disabled = running;
@@ -556,18 +609,7 @@ async function handleMergeClick() {
   // 6. Payload size pre-flight
   checkPayloadSize(emailBodyTemplate);
 
-  // 7. Mailbox provisioning pre-flight
-  let preflightToken;
-  try {
-    preflightToken = await getAccessToken();
-    await checkMailboxReady(preflightToken);
-    log("Mailbox pre-flight OK.", "info");
-  } catch (err) {
-    log(`Pre-flight error: ${err.message}`, "error");
-    return;
-  }
-
-  // 8. Check for unresolved tokens on the first recipient as a representative sample
+  // 7. Check for unresolved tokens on the first recipient as a representative sample
   const sampleSubject = personalize(subjectTemplate, valid[0]);
   const sampleBody = personalize(emailBodyTemplate, valid[0]);
   const unresolvedSubject = findUnresolvedTokens(sampleSubject);
@@ -577,7 +619,7 @@ async function handleMergeClick() {
     log(`Warning: unresolved token(s) found — these will be sent literally: ${allUnresolved.join(", ")}`, "warning");
   }
 
-  // 9. Run merge
+  // 8. Run merge
   const saveToSent = document.getElementById("saveToSentItems").checked;
   setMergeRunning(true);
   cancelRequested = false;
@@ -641,5 +683,16 @@ async function handleMergeClick() {
   }
 
   log(`─── Merge complete. ✅ Sent: ${totalSent} | ❌ Failed: ${totalFailed} ───`, totalFailed > 0 ? "warning" : "success");
+
+  // Clear persisted CSV after a successful (non-cancelled, zero-failure) merge
+  if (!cancelRequested && totalFailed === 0) {
+    lsRemove(LS_KEY_CSV);
+    document.getElementById("csvInput").value = "";
+    parsedRecipients = [];
+    document.getElementById("recipientCount").textContent = "";
+    document.getElementById("previewTable").classList.add("hidden");
+    log("CSV cleared from local storage after successful send.", "info");
+  }
+
   setMergeRunning(false);
 }

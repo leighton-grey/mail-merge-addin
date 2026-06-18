@@ -1,7 +1,7 @@
 {
   "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
   "id": "a3a648da-9dc0-48ce-948a-ba2434afcadd",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "manifestVersion": "1.17",
   "name": {
     "short": "Mail Merge",
@@ -22,6 +22,10 @@
     "outline": "https://leighton-grey.github.io/mail-merge-addin/assets/icon-outline.png"
   },
   "accentColor": "#534AB7",
+  "webApplicationInfo": {
+    "id": "a3a648da-9dc0-48ce-948a-ba2434afcadd",
+    "resource": "api://leighton-grey.github.io/mail-merge-addin/a3a648da-9dc0-48ce-948a-ba2434afcadd"
+  },
   "authorization": {
     "permissions": {
       "resourceSpecific": [
