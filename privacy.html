@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — Mail Merge</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 680px; margin: 40px auto; padding: 0 20px 60px; color: #323130; font-size: 14px; line-height: 1.7; }
+    h1 { color: #534AB7; font-size: 22px; margin-bottom: 6px; }
+    h2 { font-size: 15px; margin-top: 28px; color: #323130; }
+    p { margin: 8px 0; color: #605e5c; }
+    a { color: #534AB7; }
+    .meta { font-size: 12px; color: #a19f9d; margin-bottom: 32px; }
+  </style>
+</head>
+<body>
+  <h1>Privacy Policy</h1>
+  <p class="meta">Last updated: June 2025 &nbsp;·&nbsp; Promethean IT</p>
+
+  <h2>Overview</h2>
+  <p>Mail Merge is a Microsoft Outlook add-in developed by Promethean IT. This policy explains what data the add-in accesses and how it is handled.</p>
+
+  <h2>Data We Do Not Collect</h2>
+  <p>We do not collect, transmit, store, or process any personal data on our servers. The add-in has no backend infrastructure. All operations run entirely within your browser session.</p>
+
+  <h2>Data Processed Locally</h2>
+  <p>The following data is processed locally in your browser only and is never sent to Promethean IT:</p>
+  <ul>
+    <li>CSV recipient lists you upload or paste</li>
+    <li>Email subject lines and body templates you compose</li>
+    <li>Custom merge field tags you define</li>
+    <li>Session state saved to your browser's localStorage</li>
+  </ul>
+
+  <h2>Microsoft Graph API</h2>
+  <p>To send emails, the add-in uses the Microsoft Graph API on your behalf via your authenticated Microsoft 365 account. Email content is transmitted directly from your browser to Microsoft's servers over TLS/HTTPS. Promethean IT never receives or intercepts this data.</p>
+
+  <h2>Permissions</h2>
+  <p>The add-in requests the <code>Mail.Send</code> delegated permission. This permission is used solely to send the emails you initiate through the add-in.</p>
+
+  <h2>localStorage</h2>
+  <p>To preserve your session if the task pane is closed accidentally, the add-in saves your subject line, CSV data, and custom tags to your browser's localStorage. This data remains on your device and is never transmitted externally. You can clear it at any time via your browser's site data settings.</p>
+
+  <h2>Contact</h2>
+  <p>Questions? Contact us at <a href="mailto:leighton@prometheanit.com">leighton@prometheanit.com</a>.</p>
+</body>
+</html>
