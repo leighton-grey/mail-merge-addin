@@ -1,0 +1,133 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "version": "1.0.0",
+  "manifestVersion": "1.17",
+  "name": {
+    "short": "Mail Merge",
+    "full": "Classic Mail Merge Engine for New Outlook"
+  },
+  "description": {
+    "short": "Personalized bulk email directly in New Outlook.",
+    "full": "A free, open-source mail merge add-in for New Outlook. Replaces classic Word-to-Outlook mail merge. Processes all data locally in your browser — zero data ever touches our servers."
+  },
+  "developer": {
+    "name": "Promethean IT",
+    "websiteUrl": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin",
+    "privacyUrl": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/privacy.html",
+    "termsOfUseUrl": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/terms.html"
+  },
+  "icons": {
+    "color": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-color.png",
+    "outline": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-outline.png"
+  },
+  "accentColor": "#534AB7",
+  "authorization": {
+    "permissions": {
+      "resourceSpecific": [
+        {
+          "name": "MailboxItem.ReadWrite.User",
+          "type": "Delegated"
+        }
+      ]
+    }
+  },
+  "validDomains": [
+    "<YOUR-GITHUB-USERNAME>.github.io"
+  ],
+  "extensions": [
+    {
+      "requirements": {
+        "scopes": ["mail"],
+        "capabilities": [
+          {
+            "name": "Mailbox",
+            "minVersion": "1.10"
+          }
+        ]
+      },
+      "runtimes": [
+        {
+          "requirements": {
+            "capabilities": [
+              {
+                "name": "Mailbox",
+                "minVersion": "1.10"
+              }
+            ]
+          },
+          "id": "TaskPaneRuntime",
+          "type": "general",
+          "code": {
+            "page": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/taskpane.html"
+          },
+          "lifetime": "short",
+          "actions": [
+            {
+              "id": "OpenTaskPane",
+              "type": "openPage",
+              "pinnable": true,
+              "view": "dashboard"
+            }
+          ]
+        }
+      ],
+      "ribbons": [
+        {
+          "contexts": ["mailCompose"],
+          "tabs": [
+            {
+              "builtInTabId": "TabDefault",
+              "groups": [
+                {
+                  "id": "msgComposeGroup",
+                  "label": "Mail Merge",
+                  "icons": [
+                    {
+                      "size": 16,
+                      "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-16.png"
+                    },
+                    {
+                      "size": 32,
+                      "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-32.png"
+                    },
+                    {
+                      "size": 80,
+                      "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-80.png"
+                    }
+                  ],
+                  "controls": [
+                    {
+                      "id": "btnOpenMerge",
+                      "type": "button",
+                      "label": "Run Merge",
+                      "icons": [
+                        {
+                          "size": 16,
+                          "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-16.png"
+                        },
+                        {
+                          "size": 32,
+                          "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-32.png"
+                        },
+                        {
+                          "size": 80,
+                          "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-80.png"
+                        }
+                      ],
+                      "supertip": {
+                        "title": "Run Mail Merge",
+                        "description": "Open the Mail Merge task pane to send personalized emails to multiple recipients."
+                      },
+                      "actionId": "OpenTaskPane"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

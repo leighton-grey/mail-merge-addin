@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mail Merge</title>
+
+  <!-- Strict Content Security Policy: only allows scripts/connections from Microsoft and self -->
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self';
+             script-src 'self' https://appsforoffice.microsoft.com https://ajax.aspnetcdn.com;
+             connect-src 'self' https://graph.microsoft.com https://login.microsoftonline.com;
+             style-src 'self' 'unsafe-inline';
+             img-src 'self' data:;" />
+
+  <!-- Office.js — cache busted via version param -->
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js?v=1.0.0" type="text/javascript"></script>
+
+  <!-- App styles — cache busted via version param -->
+  <link rel="stylesheet" href="taskpane.css?v=1.0.0" />
+</head>
+<body>
+  <div class="header">
+    <span class="header-icon">✉</span>
+    <span class="header-title">Mail Merge</span>
+    <span class="header-version">v1.0.0</span>
+  </div>
+
+  <div class="section">
+    <label class="label">Subject line</label>
+    <input type="text" id="subjectInput" class="input"
+      placeholder="Hi {{first_name}}, your update from {{company}}" />
+    <p class="hint">Use <code>{{column_name}}</code> to personalize the subject.</p>
+  </div>
+
+  <div class="section">
+    <label class="label">Insert field tag</label>
+    <div id="tagBar" class="tag-bar">
+      <span class="tag" onclick="insertTag('{{first_name}}')">{{first_name}}</span>
+      <span class="tag" onclick="insertTag('{{last_name}}')">{{last_name}}</span>
+      <span class="tag" onclick="insertTag('{{email}}')">{{email}}</span>
+      <span class="tag" onclick="insertTag('{{company}}')">{{company}}</span>
+      <span class="tag" onclick="insertTag('{{title}}')">{{title}}</span>
+      <span class="tag tag-custom" onclick="promptCustomTag()">+ custom</span>
+    </div>
+    <p class="hint">Click a tag to insert it into the email body at cursor position.</p>
+  </div>
+
+  <div class="section">
+    <label class="label">Recipients <span class="hint-inline">(CSV format)</span></label>
+    <p class="hint">First row = column headers. Must include an <code>email</code> column.</p>
+    <textarea id="csvInput" class="csv-area"
+      placeholder="email,first_name,last_name,company,title&#10;john@example.com,John,Smith,Acme,Manager&#10;sara@example.com,Sara,Jones,Globex,Director"></textarea>
+    <div class="csv-actions">
+      <button class="btn-secondary" onclick="parseAndPreview()">Preview recipients</button>
+      <span id="recipientCount" class="count-badge"></span>
+    </div>
+  </div>
+
+  <div id="previewTable" class="section hidden"></div>
+
+  <div class="section">
+    <button id="mergeBtn" class="btn-primary" onclick="runMerge()">
+      ▶ Run mail merge
+    </button>
+  </div>
+
+  <div class="section">
+    <label class="label">Activity log</label>
+    <div id="statusLog" class="status-log">
+      <p class="log-entry log-info">Ready. Paste your CSV data and click "Run mail merge".</p>
+    </div>
+    <button class="btn-secondary" onclick="clearLog()" style="margin-top:6px;">Clear log</button>
+  </div>
+
+  <div class="footer">
+    <p>All data is processed locally in your browser. Zero recipient data is transmitted to or stored on GitHub Pages servers. Emails are dispatched securely via Microsoft Graph API over TLS/HTTPS on behalf of your authenticated Microsoft 365 account.</p>
+  </div>
+
+  <!-- Core engine — cache busted via version param -->
+  <script src="taskpane.js?v=1.0.0" type="text/javascript"></script>
+</body>
+</html>
