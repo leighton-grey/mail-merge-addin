@@ -28,10 +28,10 @@ All data is processed **100% locally in the user's browser**. Zero recipient dat
 ## Step 1 — Host on GitHub Pages
 
 1. Fork or clone this repository
-2. Replace all `<YOUR-GITHUB-USERNAME>` placeholders in `manifest.json` with your GitHub username
+2. Replace all `leighton-grey` placeholders in `manifest.json` with your GitHub username
 3. Go to your repo **Settings → Pages**
 4. Set source to **main branch / root folder**
-5. Your add-in will be live at `https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/`
+5. Your add-in will be live at `https://leighton-grey.github.io/mail-merge-addin/`
 
 ---
 
@@ -42,7 +42,7 @@ All data is processed **100% locally in the user's browser**. Zero recipient dat
 3. Configure:
    - **Name:** Classic Mail Merge Engine
    - **Supported account types:** Accounts in any organizational directory (Multitenant)
-   - **Redirect URI:** Single-page application (SPA) → `https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/taskpane.html`
+   - **Redirect URI:** Single-page application (SPA) → `https://leighton-grey.github.io/mail-merge-addin/taskpane.html`
 4. Click **Register**
 5. Go to **API permissions → Add a permission → Microsoft Graph → Delegated**
 6. Add `Mail.Send`

@@ -13,13 +13,13 @@
   },
   "developer": {
     "name": "Promethean IT",
-    "websiteUrl": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin",
-    "privacyUrl": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/privacy.html",
-    "termsOfUseUrl": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/terms.html"
+    "websiteUrl": "https://leighton-grey.github.io/mail-merge-addin",
+    "privacyUrl": "https://leighton-grey.github.io/mail-merge-addin/privacy.html",
+    "termsOfUseUrl": "https://leighton-grey.github.io/mail-merge-addin/terms.html"
   },
   "icons": {
-    "color": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-color.png",
-    "outline": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-outline.png"
+    "color": "https://leighton-grey.github.io/mail-merge-addin/assets/icon-color.png",
+    "outline": "https://leighton-grey.github.io/mail-merge-addin/assets/icon-outline.png"
   },
   "accentColor": "#534AB7",
   "authorization": {
@@ -33,7 +33,7 @@
     }
   },
   "validDomains": [
-    "<YOUR-GITHUB-USERNAME>.github.io"
+    "leighton-grey.github.io"
   ],
   "extensions": [
     {
@@ -59,7 +59,7 @@
           "id": "TaskPaneRuntime",
           "type": "general",
           "code": {
-            "page": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/taskpane.html"
+            "page": "https://leighton-grey.github.io/mail-merge-addin/taskpane.html"
           },
           "lifetime": "short",
           "actions": [
@@ -85,15 +85,15 @@
                   "icons": [
                     {
                       "size": 16,
-                      "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-16.png"
+                      "url": "https://leighton-grey.github.io/mail-merge-addin/assets/icon-16.png"
                     },
                     {
                       "size": 32,
-                      "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-32.png"
+                      "url": "https://leighton-grey.github.io/mail-merge-addin/assets/icon-32.png"
                     },
                     {
                       "size": 80,
-                      "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-80.png"
+                      "url": "https://leighton-grey.github.io/mail-merge-addin/assets/icon-80.png"
                     }
                   ],
                   "controls": [
@@ -104,15 +104,15 @@
                       "icons": [
                         {
                           "size": 16,
-                          "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-16.png"
+                          "url": "https://leighton-grey.github.io/mail-merge-addin/assets/icon-16.png"
                         },
                         {
                           "size": 32,
-                          "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-32.png"
+                          "url": "https://leighton-grey.github.io/mail-merge-addin/assets/icon-32.png"
                         },
                         {
                           "size": 80,
-                          "url": "https://<YOUR-GITHUB-USERNAME>.github.io/mail-merge-addin/assets/icon-80.png"
+                          "url": "https://leighton-grey.github.io/mail-merge-addin/assets/icon-80.png"
                         }
                       ],
                       "supertip": {
