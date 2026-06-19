@@ -5,88 +5,361 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Mail Merge</title>
 
-  <!-- Strict Content Security Policy: only allows scripts/connections from Microsoft and self -->
+  <!-- Content Security Policy -->
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'self';
-             script-src 'self' https://appsforoffice.microsoft.com https://ajax.aspnetcdn.com;
+             script-src 'self' https://appsforoffice.microsoft.com https://ajax.aspnetcdn.com https://cdnjs.cloudflare.com;
              connect-src 'self' https://graph.microsoft.com https://login.microsoftonline.com;
              style-src 'self' 'unsafe-inline';
              img-src 'self' data:;" />
 
-  <!-- Office.js — cache busted via version param -->
-  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js?v=1.0.0" type="text/javascript"></script>
+  <!-- Office.js -->
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js" type="text/javascript"></script>
 
-  <!-- App styles — cache busted via version param -->
-  <link rel="stylesheet" href="taskpane.css?v=1.0.3" />
+  <!-- SheetJS — Excel parsing, loaded from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" type="text/javascript"></script>
+
+  <!-- App styles -->
+  <link rel="stylesheet" href="taskpane.css?v=1.9.0" />
 </head>
 <body>
   <div class="header">
     <span class="header-icon">✉</span>
     <span class="header-title">Mail Merge</span>
-    <span class="header-version">v1.0.3</span>
+    <span class="header-version">v1.9.0</span>
   </div>
 
-  <div class="section">
-    <label class="label">Subject line</label>
-    <input type="text" id="subjectInput" class="input"
-      placeholder="Hi {{first_name}}, your update from {{company}}" />
-    <p class="hint">Use <code>{{column_name}}</code> to personalize the subject.</p>
+  <div class="tab-bar" role="tablist">
+    <button class="tab-btn active" data-tab="recipients" role="tab" aria-selected="true">👥 Recipients</button>
+    <button class="tab-btn" data-tab="compose" role="tab" aria-selected="false">✏️ Compose</button>
+    <button class="tab-btn" data-tab="options" role="tab" aria-selected="false">⚙️ Options</button>
   </div>
 
-  <div class="section">
-    <label class="label">Insert field tag</label>
-    <div id="tagBar" class="tag-bar">
-      <span class="tag" data-tag="{{first_name}}">{{first_name}}</span>
-      <span class="tag" data-tag="{{last_name}}">{{last_name}}</span>
-      <span class="tag" data-tag="{{email}}">{{email}}</span>
-      <span class="tag" data-tag="{{company}}">{{company}}</span>
-      <span class="tag" data-tag="{{title}}">{{title}}</span>
-    </div>
-    <div class="custom-tag-row">
-      <input type="text" id="customTagInput" class="input input-inline"
-        placeholder="custom_field_name" />
-      <button class="btn-secondary" id="addCustomTagBtn">+ Add tag</button>
-    </div>
-    <p class="hint">Click a tag to insert it. If the subject line is focused, the tag goes there; otherwise it goes into the email body.</p>
-  </div>
+  <div class="tab-content-wrap">
 
-  <div class="section">
-    <label class="label">Recipients <span class="hint-inline">(CSV format)</span></label>
-    <p class="hint">First row = column headers. Must include an <code>email</code> column.</p>
-    <div class="csv-upload-row">
-      <button class="btn-secondary" id="uploadCsvBtn">📂 Load CSV file</button>
-      <input type="file" id="csvFileInput" accept=".csv,text/csv" class="hidden" />
-      <span class="hint-inline">or paste below</span>
-    </div>
-    <textarea id="csvInput" class="csv-area"
-      placeholder="email,first_name,last_name,company,title&#10;john@example.com,John,Smith,Acme,Manager&#10;sara@example.com,Sara,Jones,Globex,Director"></textarea>
-    <div class="csv-actions">
-      <button class="btn-secondary" id="previewBtn">Preview recipients</button>
-      <span id="recipientCount" class="count-badge"></span>
-    </div>
-  </div>
+    <!-- Tab: Recipients -->
+    <div id="tab-recipients" class="tab-pane">
 
-  <div id="previewTable" class="section hidden"></div>
+      <!-- CSV section -->
+      <div class="section">
+        <div class="csv-upload-row">
+          <button class="btn-secondary" id="uploadCsvBtn">📂 Load file</button>
+          <input type="file" id="csvFileInput" accept=".csv,.xlsx,.xls,text/csv" class="hidden" />
+          <button class="btn-secondary" id="importContactsBtn">👤 From Contacts</button>
+          <span class="hint-inline">or paste CSV below</span>
+          <span id="recipientCount" class="count-badge"></span>
+        </div>
+        <textarea id="csvInput" class="csv-area"
+          placeholder="email,first_name,last_name&#10;john@example.com,John,Smith"></textarea>
+        <div class="csv-actions">
+          <button class="btn-secondary" id="previewBtn">Preview</button>
+          <button class="btn-secondary" id="mapFieldsBtn" style="display:none;">⇄ Map fields</button>
+          <span class="hint" style="flex:1;margin:0;font-size:10px">Headers required: <code>email</code>. Optional: <code>cc</code> <code>bcc</code> <code>attachment</code> <code>display_name</code> <code>salutation</code> <code>first_name</code> <code>last_name</code> <code>gender</code> <code>skip_if</code> <code>send_at</code>. Delimiters: semicolon, comma, or space.</span>
+        </div>
+      </div>
 
-  <div class="section">
-    <div class="send-options">
-      <label class="checkbox-label">
-        <input type="checkbox" id="saveToSentItems" checked />
-        Save sent emails to Sent Items
-      </label>
+      <!-- Filter / sort bar (shown after CSV is parsed) -->
+      <div id="filterSortBar" class="section hidden">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
+          <strong style="font-size:11px;">Filter</strong>
+          <select id="filterLogic" class="select-inline" style="min-width:55px;">
+            <option value="AND">AND</option>
+            <option value="OR">OR</option>
+          </select>
+          <button class="btn-secondary" id="addFilterCondBtn" style="font-size:11px;padding:2px 8px;">+ Condition</button>
+          <select id="sortCol" class="select-inline" style="min-width:90px;"><option value="">Sort col…</option></select>
+          <select id="sortDir" class="select-inline" style="min-width:60px;">
+            <option value="asc">A→Z</option>
+            <option value="desc">Z→A</option>
+          </select>
+          <button class="btn-secondary" id="applyFilterBtn">Apply</button>
+          <button class="btn-secondary" id="clearFilterBtn">Clear</button>
+          <span id="filterCountLabel" class="hint-inline"></span>
+        </div>
+        <div id="filterConditions"></div>
+      </div>
+
+      <div id="previewTable" class="section hidden"></div>
+
+      <!-- Suppression -->
+      <div class="section">
+        <label class="label">Suppression list <span class="hint-inline">(do not contact)</span></label>
+        <div class="attachment-row">
+          <button class="btn-secondary" id="uploadSuppressionBtn">🚫 Load list</button>
+          <input type="file" id="suppressionFileInput" accept=".csv,.txt,text/plain,text/csv" class="hidden" />
+          <span id="suppressionLabel" class="attachment-label">None loaded</span>
+          <button class="btn-icon hidden" id="clearSuppressionBtn" title="Clear suppression list">✕</button>
+        </div>
+        <p class="hint">Addresses in this list will be silently skipped.</p>
+      </div>
+
+      <!-- Attachments -->
+      <div class="section">
+        <label class="label">Attachments</label>
+        <p class="sublabel">Shared <span class="hint-inline">(all recipients)</span></p>
+        <div class="attachment-row">
+          <button class="btn-secondary" id="uploadAttachmentBtn">📎 Add files</button>
+          <input type="file" id="attachmentFileInput" multiple class="hidden" />
+          <span id="attachmentLabel" class="attachment-label">None</span>
+          <button class="btn-icon hidden" id="clearSharedAttachmentsBtn" title="Clear all attachments">✕</button>
+        </div>
+        <p class="hint">Max 3 MB per file.</p>
+
+        <div class="attachment-subsection">
+          <p class="sublabel">Per-recipient <span class="hint-inline">(matched by filename)</span></p>
+          <div class="attachment-row">
+            <button class="btn-secondary" id="uploadPerRecipientBtn">📁 Load files</button>
+            <input type="file" id="perRecipientFilesInput" multiple class="hidden" />
+            <span id="perRecipientLabel" class="attachment-label">None loaded</span>
+            <button class="btn-icon hidden" id="clearPerRecipientBtn" title="Clear all">✕</button>
+          </div>
+          <p class="hint">Add <code>attachment</code> column to CSV with exact filename. Falls back to shared if no match.</p>
+        </div>
+
+        <div class="attachment-subsection">
+          <p class="sublabel">Inline images <span class="hint-inline">(CID-embedded)</span></p>
+          <div class="attachment-row">
+            <button class="btn-secondary" id="uploadInlineImagesBtn">🖼 Load images</button>
+            <input type="file" id="inlineImagesInput" multiple accept="image/*" class="hidden" />
+            <span id="inlineImagesLabel" class="attachment-label">None loaded</span>
+            <button class="btn-icon hidden" id="clearInlineImagesBtn" title="Clear inline images">✕</button>
+          </div>
+          <p class="hint">Reference in HTML body as <code>&lt;img src="cid:filename.png"&gt;</code>.</p>
+        </div>
+      </div>
+
+    </div><!-- /tab-recipients -->
+
+    <!-- Tab: Compose -->
+    <div id="tab-compose" class="tab-pane hidden">
+
+      <div class="section">
+        <label class="label">Subject</label>
+        <input type="text" id="subjectInput" class="input"
+          placeholder="Hi {{first_name}}, update from {{company}}" />
+        <p class="hint" style="margin-top:4px">Use <code>{{column_name}}</code> to personalize. <code>{{if:col=val:yes:no}}</code> for conditionals. Pipe filters: <code>{{name|upper}}</code>, <code>{{amount|currency}}</code>, <code>{{date|date}}</code>, <code>{{name|title}}</code>, <code>{{name|lower}}</code>, <code>{{value|number}}</code>, <code>{{value|trim}}</code>. Smart tokens: <code>{{record_num}}</code>, <code>{{record_count}}</code>.</p>
+        <button class="btn-secondary" id="checkErrorsBtn" style="margin-top:6px;">🔍 Check for errors</button>
+
+        <div style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <label class="label" style="margin:0;">Insert field at cursor</label>
+          <select id="insertFieldSelect" class="select-inline" style="min-width:120px;">
+            <option value="">— pick field —</option>
+          </select>
+          <button class="btn-secondary" id="insertFieldBtn">Insert into body</button>
+        </div>
+        <p class="hint" style="margin-top:2px;">Inserts {{field}} at the current cursor position in the compose window.</p>
+
+        <label class="label" style="margin-top:10px">Field tags</label>
+        <div id="tagBar" class="tag-bar">
+          <span class="tag" data-tag="{{first_name}}">{{first_name}}</span>
+          <span class="tag" data-tag="{{last_name}}">{{last_name}}</span>
+          <span class="tag" data-tag="{{email}}">{{email}}</span>
+          <span class="tag" data-tag="{{company}}">{{company}}</span>
+          <span class="tag" data-tag="{{title}}">{{title}}</span>
+          <span class="tag tag-smart" data-tag="{{greeting_line}}">{{greeting_line}}</span>
+          <span class="tag tag-smart" data-tag="{{today}}">{{today}}</span>
+          <span class="tag tag-smart" data-tag="{{now}}">{{now}}</span>
+        </div>
+        <div class="custom-tag-row">
+          <input type="text" id="customTagInput" class="input input-inline" placeholder="custom_field_name" />
+          <button class="btn-secondary" id="addCustomTagBtn">+ Add tag</button>
+        </div>
+        <p class="hint">Click a tag to insert it. <code>{{greeting_line}}</code> auto-generates "Dear Mr. Smith" from <code>salutation</code>/<code>first_name</code>/<code>last_name</code>/<code>gender</code>. <code>{{today}}</code> / <code>{{now}}</code> insert send date/time.</p>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <label class="label" style="margin:0;white-space:nowrap;">{{greeting_line}} format</label>
+          <select id="greetingFormat" class="select-inline">
+            <option value="dear_sal_last">Dear [Sal] [Last]</option>
+            <option value="dear_first">Dear [First]</option>
+            <option value="dear_first_last">Dear [First] [Last]</option>
+            <option value="hi_first">Hi [First]</option>
+            <option value="to_sal_last">To [Sal] [Last]</option>
+          </select>
+          <input type="text" id="greetingFallback" class="input input-inline"
+            placeholder="Fallback (e.g. Dear Valued Customer)" style="max-width:180px;" />
+        </div>
+      </div>
+
+      <div class="section">
+        <label class="label">Reply-To <span class="hint-inline">(optional)</span></label>
+        <input type="email" id="replyToInput" class="input" placeholder="replies@company.com" />
+      </div>
+
+      <div class="section">
+        <label class="label">Templates</label>
+        <div class="template-row">
+          <input type="text" id="templateNameInput" class="input input-inline" placeholder="Template name" />
+          <button class="btn-secondary" id="saveTemplateBtn">Save</button>
+          <select id="templateSelect" class="select-inline"></select>
+          <button class="btn-secondary" id="deleteTemplateBtn" disabled>Delete</button>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:6px;">
+          <button class="btn-secondary" id="saveBodyToTemplateBtn">📋 Save body to template</button>
+          <button class="btn-secondary" id="loadBodyFromTemplateBtn">📋 Load body from template</button>
+        </div>
+        <p class="hint">Saves subject, reply-to, all send options, and settings. Load a template to restore everything.</p>
+        <p class="hint">Saves/restores the email body in the current compose window alongside settings.</p>
+      </div>
+
+    </div><!-- /tab-compose -->
+
+    <!-- Tab: Options -->
+    <div id="tab-options" class="tab-pane hidden">
+
+      <div class="section">
+        <!-- 2-column checkbox grid -->
+        <div class="opts-grid">
+          <label class="checkbox-label"><input type="checkbox" id="saveToSentItems" checked />Save to Sent</label>
+          <label class="checkbox-label"><input type="checkbox" id="deduplicateEnabled" />Dedup</label>
+          <label class="checkbox-label"><input type="checkbox" id="requestReadReceipt" />Read receipt</label>
+          <label class="checkbox-label"><input type="checkbox" id="requestDeliveryReceipt" />Delivery receipt</label>
+          <label class="checkbox-label"><input type="checkbox" id="bccSelfEnabled" />BCC self</label>
+          <label class="checkbox-label"><input type="checkbox" id="flagForFollowup" />Flag follow-up</label>
+          <label class="checkbox-label"><input type="checkbox" id="plainTextMode" />Plain text</label>
+        </div>
+
+        <div class="importance-row" style="margin-top:8px;">
+          <span class="importance-label">Priority</span>
+          <select id="importanceSelect" class="select-inline">
+            <option value="normal" selected>Normal</option>
+            <option value="high">High !</option>
+            <option value="low">Low ↓</option>
+          </select>
+          <span class="importance-label" style="margin-left:10px;">Sensitivity</span>
+          <select id="sensitivitySelect" class="select-inline">
+            <option value="normal" selected>Normal</option>
+            <option value="personal">Personal</option>
+            <option value="private">Private</option>
+            <option value="confidential">Confidential</option>
+          </select>
+        </div>
+
+        <!-- Scheduling accordion -->
+        <div class="accordion" style="margin-top:10px;">
+          <button class="accordion-hdr" data-accordion="scheduling">
+            Scheduling <span class="accordion-chevron">›</span>
+          </button>
+          <div id="accordion-scheduling" class="accordion-body hidden">
+            <label class="checkbox-label">
+              <input type="checkbox" id="scheduleEnabled" />
+              Schedule send
+            </label>
+            <div id="scheduleRow" class="hidden schedule-row" style="margin-top:6px;">
+              <input type="datetime-local" id="scheduledTime" class="input" />
+              <p class="hint">Exchange deferred delivery — sends even if Outlook is closed. Requires <code>Mail.ReadWrite</code> on the Entra app registration.</p>
+            </div>
+            <label class="checkbox-label" style="margin-top:8px;">
+              <input type="checkbox" id="expiryEnabled" />
+              Set message expiry date
+            </label>
+            <div id="expiryRow" class="hidden schedule-row" style="margin-top:6px;">
+              <input type="datetime-local" id="expiryDateTimeInput" class="input" />
+              <p class="hint">Message will expire (become undeliverable) after this date.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Advanced accordion -->
+        <div class="accordion">
+          <button class="accordion-hdr" data-accordion="advanced">
+            Advanced <span class="accordion-chevron">›</span>
+          </button>
+          <div id="accordion-advanced" class="accordion-body hidden">
+
+            <label class="label">Send As / Send On Behalf Of <span class="hint-inline">(optional)</span></label>
+            <input type="email" id="sendAsInput" class="input" placeholder="info@company.com" />
+            <p class="hint">Requires Send As or Send On Behalf rights in Exchange.</p>
+
+            <label class="label" style="margin-top:8px;">Categories <span class="hint-inline">(comma-separated)</span></label>
+            <input type="text" id="categoriesInput" class="input" placeholder="Follow Up, Newsletter" />
+            <p class="hint">Stamps Outlook categories on sent items. Recipients do not see these.</p>
+
+            <label class="checkbox-label" style="margin-top:8px;">
+              <input type="checkbox" id="customHeadersEnabled" />
+              Custom X- headers
+            </label>
+            <div id="customHeadersRow" class="hidden schedule-row">
+              <textarea id="customHeadersInput" class="csv-area" style="height:52px;"
+                placeholder="X-Campaign: june-newsletter&#10;X-Mailer: PrometheanIT"></textarea>
+              <p class="hint">One header per line: <code>Name: Value</code>. Use <code>X-</code> prefix.</p>
+            </div>
+
+            <label class="label" style="margin-top:8px;">List-Unsubscribe <span class="hint-inline">(newsletter compliance)</span></label>
+            <input type="text" id="listUnsubscribeInput" class="input" placeholder="https://example.com/unsub?id={{email}}" />
+            <p class="hint">RFC 2369/8058. Supports <code>{{field}}</code> tokens.</p>
+
+            <button class="btn-secondary" id="clearSendHistoryBtn" style="margin-top:6px;font-size:11px;">🗑 Clear send history</button>
+            <p class="hint">Clears the 30-day duplicate send guard history.</p>
+
+            <label class="label" style="margin-top:8px;">Batch delay <span id="batchDelayLabel" class="hint-inline">(1.5 s between batches)</span></label>
+            <input type="range" id="batchDelayInput" min="0" max="10" step="0.5" value="1.5" class="range-input" />
+
+          </div>
+        </div>
+
+      </div>
+
+    </div><!-- /tab-options -->
+
+  </div><!-- /tab-content-wrap -->
+
+  <!-- Sticky app footer -->
+  <div class="app-footer">
+    <!-- Progress bar (hidden until merge runs) -->
+    <div id="progressContainer" class="progress-container hidden" style="margin-bottom:6px;">
+      <div id="progressFill" class="progress-fill"></div>
+      <span id="progressLabel" class="progress-label">0%</span>
     </div>
+
+    <!-- Action buttons row -->
     <div class="merge-actions">
+      <button id="testSendBtn" class="btn-secondary">📨 Test</button>
+      <button id="previewAllBtn" class="btn-secondary">👁 Preview</button>
+      <button id="saveDraftsBtn" class="btn-secondary">📝 Drafts</button>
+      <button id="broadcastBtn" class="btn-secondary">📢 Broadcast</button>
       <button id="mergeBtn" class="btn-primary">▶ Run mail merge</button>
       <button id="stopBtn" class="btn-danger hidden">⏹ Stop</button>
     </div>
+
+    <!-- Retry / report (hidden until needed) -->
+    <div style="margin-top:5px;display:flex;gap:6px;flex-wrap:wrap;">
+      <button id="retryFailedBtn" class="btn-secondary hidden"></button>
+      <button id="downloadReportBtn" class="btn-secondary hidden">📊 Download report</button>
+    </div>
+
+    <!-- Mini log + expand button -->
+    <div class="footer-log-row">
+      <div id="footerLogMini" class="footer-log-mini"></div>
+      <button class="btn-secondary" id="toggleLogBtn" style="white-space:nowrap;font-size:11px;padding:2px 8px;">Log ↕</button>
+    </div>
+
+    <!-- Full log (collapsed by default) -->
+    <div id="fullLogArea" class="hidden" style="margin-top:6px;">
+      <div id="statusLog" class="status-log">
+        <p class="log-entry log-info">Ready. Load a CSV file or paste data, then click "Run mail merge".</p>
+      </div>
+      <div style="margin-top:5px;display:flex;gap:6px;">
+        <button class="btn-secondary" id="clearLogBtn">Clear log</button>
+        <button class="btn-secondary" id="downloadLogBtn">⬇ Download log</button>
+      </div>
+    </div>
   </div>
 
-  <div class="section">
-    <label class="label">Activity log</label>
-    <div id="statusLog" class="status-log">
-      <p class="log-entry log-info">Ready. Paste your CSV data and click "Run mail merge".</p>
+  <!-- Preview all modal -->
+  <div id="previewModal" class="modal-overlay hidden">
+    <div class="modal modal-preview">
+      <div class="preview-modal-header">
+        <span id="previewCounter" class="preview-counter">Preview 1 / 0</span>
+        <button id="previewCloseBtn" class="btn-icon" title="Close">✕</button>
+      </div>
+      <div class="preview-subject-row">
+        <strong>Subject:</strong> <span id="previewSubject" class="preview-subject-text"></span>
+      </div>
+      <iframe id="previewBodyFrame" class="preview-body-frame" sandbox="allow-same-origin"></iframe>
+      <div class="modal-actions" style="margin-top:10px;">
+        <button id="previewPrevBtn" class="btn-secondary" disabled>← Prev</button>
+        <button id="previewNextBtn" class="btn-secondary">Next →</button>
+      </div>
     </div>
-    <button class="btn-secondary" id="clearLogBtn" style="margin-top:6px;">Clear log</button>
   </div>
 
   <!-- Confirmation modal -->
@@ -105,7 +378,71 @@
     <p>All data is processed locally in your browser. Your subject line and CSV are saved to your browser's local storage for convenience — nothing is transmitted to or stored on GitHub Pages servers. Emails are dispatched securely via Microsoft Graph API over TLS/HTTPS on behalf of your authenticated Microsoft 365 account.</p>
   </div>
 
-  <!-- Core engine — cache busted via version param -->
-  <script src="taskpane.js?v=1.0.3" type="text/javascript"></script>
+  <!-- Contacts picker modal -->
+  <div id="contactsModal" class="modal-overlay hidden">
+    <div class="modal" style="width:320px;max-height:480px;display:flex;flex-direction:column;">
+      <div style="display:flex;gap:0;margin-bottom:8px;border-bottom:1px solid #edebe9;">
+        <button class="tab-btn active" id="contactsTabContacts" style="flex:none;padding:6px 12px;font-size:12px;">Contacts</button>
+        <button class="tab-btn" id="contactsTabGroups" style="flex:none;padding:6px 12px;font-size:12px;">Groups</button>
+        <button class="tab-btn" id="contactsTabDirectory" style="flex:none;padding:6px 12px;font-size:12px;">Directory</button>
+        <div style="flex:1;"></div>
+        <button class="btn-icon" id="contactsCloseBtn">✕</button>
+      </div>
+      <div id="directorySearchRow" style="display:none;margin-bottom:8px;">
+        <input type="text" id="directorySearch" class="input" placeholder="Search company directory…" />
+      </div>
+      <input type="text" id="contactsSearch" class="input" placeholder="Search name or email…" style="margin-bottom:8px;" />
+      <div id="contactsList" style="flex:1;overflow-y:auto;font-size:12px;border:1px solid #edebe9;border-radius:4px;"></div>
+      <div id="groupsList" style="flex:1;overflow-y:auto;font-size:12px;border:1px solid #edebe9;border-radius:4px;display:none;"></div>
+      <div id="directoryList" style="flex:1;overflow-y:auto;font-size:12px;border:1px solid #edebe9;border-radius:4px;display:none;"></div>
+      <div style="margin-top:8px;display:flex;gap:6px;justify-content:flex-end;">
+        <span id="contactsSelectedCount" style="font-size:11px;color:#605e5c;align-self:center;flex:1;"></span>
+        <button class="btn-secondary" id="contactsSelectAllBtn">All</button>
+        <button class="btn-primary" id="contactsImportBtn">Import selected</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Match Fields modal -->
+  <div id="matchFieldsModal" class="modal-overlay hidden">
+    <div class="modal" style="width:340px;max-height:500px;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <strong style="font-size:13px;">Map CSV columns to fields</strong>
+        <button class="btn-icon" id="matchFieldsCloseBtn">✕</button>
+      </div>
+      <p class="hint" style="margin-bottom:8px;">For each field, choose which CSV column contains that data. Leave "— skip —" to ignore a field.</p>
+      <div id="matchFieldsBody" style="flex:1;overflow-y:auto;"></div>
+      <div style="margin-top:10px;display:flex;gap:6px;justify-content:flex-end;">
+        <button class="btn-secondary" id="matchFieldsCancelBtn">Cancel</button>
+        <button class="btn-primary" id="matchFieldsApplyBtn">Apply mapping</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Check for Errors modal -->
+  <div id="checkErrorsModal" class="modal-overlay hidden">
+    <div class="modal" style="width:360px;max-height:520px;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <strong style="font-size:13px;">Pre-flight check</strong>
+        <button class="btn-icon" id="checkErrorsCloseBtn">✕</button>
+      </div>
+      <div id="checkErrorsBody" style="flex:1;overflow-y:auto;font-size:12px;"></div>
+    </div>
+  </div>
+
+  <!-- Duplicate send warning modal -->
+  <div id="dupeSendModal" class="modal-overlay hidden">
+    <div class="modal">
+      <p class="modal-title">⚠ Recent send detected</p>
+      <div id="dupeSendBody" class="modal-body"></div>
+      <div class="modal-actions">
+        <button id="dupeSendProceedBtn" class="btn-primary">Send anyway</button>
+        <button id="dupeSendCancelBtn" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Core engine -->
+  <script src="taskpane.js?v=1.9.0" type="text/javascript"></script>
 </body>
 </html>
