@@ -1,4 +1,4 @@
-/* Mail Merge Engine v1.9.0
+/* Mail Merge Engine v1.9.1
  * Auth: Office.js SSO -> Microsoft Graph API
  * Batching: 20 requests per Graph $batch call (reduced dynamically when attachment present)
  * Privacy: Subject + CSV cached in browser localStorage only. Nothing stored server-side.
@@ -51,6 +51,7 @@
  *           {{record_num}}/{{record_count}} tokens.
  * v1.9.0 — 8 bug fixes (record_num offset, test send tokens, checkbox state, CSV escaping, dead code);
  *           broadcast mode, multi-criteria AND/OR filter, duplicate send guard, GAL directory import.
+ * v1.9.1 — 15 bug fixes: initTabs scope, validateRecipients null guard, broadcast validation/suppression/multi-TO/toRecipients, retry restore logic, stop-button race, directory search encoding, duplicate guard multi-TO, contact import header matching, log row numbers, opt-smart class, dead code cleanup
  */
 
 const GRAPH_BATCH_URL     = "https://graph.microsoft.com/v1.0/$batch";
@@ -394,10 +395,10 @@ function clearLog() {
 }
 
 function initTabs() {
-  document.querySelectorAll(".tab-btn").forEach(btn => {
+  document.querySelectorAll(".tab-bar .tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       const target = btn.dataset.tab;
-      document.querySelectorAll(".tab-btn").forEach(b => {
+      document.querySelectorAll(".tab-bar .tab-btn").forEach(b => {
         b.classList.remove("active");
         b.setAttribute("aria-selected", "false");
       });
@@ -982,20 +983,13 @@ function clearSuppression() {
 /* ─── RETRY FAILED ─────────────────────────────────────────────── */
 
 async function handleRetryFailed() {
-  if (!failedRecipients.length) {
-    log("No failed recipients to retry.", "info");
-    return;
-  }
-  log(`Retrying ${failedRecipients.length} failed recipient${failedRecipients.length !== 1 ? "s" : ""}...`, "info");
+  if (!failedRecipients.length) return;
   const saved = parsedRecipients.slice();
   parsedRecipients = failedRecipients.slice();
   failedRecipients = [];
-  document.getElementById("retryFailedBtn").classList.add("hidden");
   await handleMergeClick();
-  // Only restore if handleMergeClick didn't already clear parsedRecipients
-  if (parsedRecipients.length === 0) {
-    parsedRecipients = saved;
-  }
+  // Always restore original list — merge manages its own state
+  parsedRecipients = saved;
 }
 
 /* ─── TAG INSERTION ────────────────────────────────────────────── */
@@ -1872,11 +1866,15 @@ function validateRecipients(recipients) {
       continue;
     }
 
+    if (!r.email) {
+      log(`Row ${i + 2}: missing email address — row skipped.`, "warning");
+      continue;
+    }
     const addresses = r.email.split(/[;,\s]+/).map(s => s.trim()).filter(Boolean);
     // Log a warning for each invalid address in a multi-address row
     addresses.forEach(addr => {
       if (!EMAIL_REGEX.test(addr)) {
-        log(`Row ${i + 1}: invalid address skipped — "${addr}"`, "warning");
+        log(`Row ${i + 2}: invalid address skipped — "${addr}"`, "warning");
       }
     });
     const hasValid  = addresses.some(a => EMAIL_REGEX.test(a));
@@ -2410,7 +2408,7 @@ async function sendImmediateBatch(
 
 let pendingMergeResolve = null;
 
-function showConfirmModal(rowCount, addressCount, scheduledTimeISO, attachmentInfo, broadcastMode) {
+function showConfirmModal(rowCount, addressCount, scheduledTimeISO, broadcastMode) {
   return new Promise((resolve) => {
     pendingMergeResolve = resolve;
 
@@ -2479,7 +2477,7 @@ function setMergeRunning(running) {
   draftsBtn.disabled    = running;   // prevent concurrent drafts run
   broadcastBtn.disabled = running;   // prevent concurrent broadcast
   mergeBtn.textContent = running ? "⏳ Sending..." : "▶ Run mail merge";
-  stopBtn.disabled = false;
+  stopBtn.disabled = !running;
   stopBtn.classList.toggle("hidden", !running);
   if (!running) hideProgress();
 }
@@ -2655,8 +2653,8 @@ async function handleMergeClick() {
   warnedMissingAttachments.clear();
   document.getElementById("retryFailedBtn").classList.add("hidden");
   document.getElementById("downloadReportBtn").classList.add("hidden");
+  cancelRequested = false;   // reset BEFORE enabling Stop
   setMergeRunning(true);
-  cancelRequested = false;
   if (draftsMode) {
     log("Starting mail merge in DRAFTS mode — emails will be saved to Drafts folder, not sent.", "info");
   } else {
@@ -2872,10 +2870,17 @@ function importSelectedContacts() {
 
   const csvInput = document.getElementById("csvInput");
   const existing = csvInput.value.trim();
-  if (existing) {
-    csvInput.value = existing + "\n" + rows.join("\n");
+  const emailHeader = "email,first_name,last_name";
+  const existingLines = existing.split("\n").map(l => l.trim()).filter(Boolean);
+  const existingHeader = existingLines[0] || "";
+
+  if (!existing || existingHeader === emailHeader) {
+    // Empty or already has matching header — append (or start fresh)
+    csvInput.value = (existing ? existing + "\n" : emailHeader + "\n") + rows.join("\n");
   } else {
-    csvInput.value = header + "\n" + rows.join("\n");
+    // Different header — start fresh, warn
+    log("Contact import: existing CSV has different columns — starting fresh with imported contacts.", "warning");
+    csvInput.value = emailHeader + "\n" + rows.join("\n");
   }
   csvInput.dispatchEvent(new Event("input")); // trigger localStorage save
 
@@ -2962,10 +2967,17 @@ async function importContactFolder(folderId, folderName) {
 
     const csvInput = document.getElementById("csvInput");
     const existing = csvInput.value.trim();
-    if (existing) {
-      csvInput.value = existing + "\n" + rows.join("\n");
+    const emailHeader = "email,first_name,last_name";
+    const existingLines = existing.split("\n").map(l => l.trim()).filter(Boolean);
+    const existingHeader = existingLines[0] || "";
+
+    if (!existing || existingHeader === emailHeader) {
+      // Empty or already has matching header — append (or start fresh)
+      csvInput.value = (existing ? existing + "\n" : emailHeader + "\n") + rows.join("\n");
     } else {
-      csvInput.value = header + "\n" + rows.join("\n");
+      // Different header — start fresh, warn
+      log("Contact import: existing CSV has different columns — starting fresh with imported contacts.", "warning");
+      csvInput.value = emailHeader + "\n" + rows.join("\n");
     }
     csvInput.dispatchEvent(new Event("input"));
     document.getElementById("contactsModal").classList.add("hidden");
@@ -2981,7 +2993,11 @@ async function importContactFolder(folderId, folderName) {
 function recordSentEmails(emails) {
   const history = lsGet(LS_KEY_SEND_HISTORY, {});
   const now = new Date().toISOString();
-  emails.forEach(email => { history[email.toLowerCase()] = now; });
+  emails.forEach(rawEmail => {
+    parseAddressList(rawEmail).forEach(entry => {
+      history[entry.emailAddress.address.toLowerCase()] = now;
+    });
+  });
   // Prune entries older than 30 days
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   Object.keys(history).forEach(k => { if (history[k] < cutoff) delete history[k]; });
@@ -2990,10 +3006,10 @@ function recordSentEmails(emails) {
 
 function checkDuplicateSendHistory(recipients) {
   const history = lsGet(LS_KEY_SEND_HISTORY, {});
-  const dupes = recipients.filter(r =>
-    r.email && history[r.email.toLowerCase()]
-  );
-  return dupes;
+  return recipients.filter(r => {
+    const addrs = parseAddressList(r.email || "");
+    return addrs.some(a => history[a.emailAddress.address.toLowerCase()]);
+  });
 }
 
 function showDuplicateWarningModal(dupes) {
@@ -3024,15 +3040,39 @@ function showDuplicateWarningModal(dupes) {
 /* ─── BROADCAST MODE (Feature 1 v1.9) ──────────────────────────── */
 
 async function handleBroadcast() {
-  const valid = getFilteredSortedRecipients();
-  if (!valid.length) { log("No recipients loaded.", "warning"); return; }
+  const rawValid = getFilteredSortedRecipients();
+  if (!rawValid.length) { log("No recipients loaded.", "warning"); return; }
 
   const subject = document.getElementById("subjectInput").value.trim();
   if (!subject) { log("Enter a subject before broadcasting.", "warning"); return; }
 
+  // Apply suppression list
+  const suppressed = rawValid.filter(r => suppressionSet.has((r.email || "").toLowerCase()));
+  if (suppressed.length) {
+    log(`Broadcast: ${suppressed.length} suppressed address(es) excluded.`, "info");
+  }
+  const afterSuppression = rawValid.filter(r => !suppressionSet.has((r.email || "").toLowerCase()));
+
+  // Validate emails
+  const validEmails = afterSuppression.filter(r => {
+    const addrs = parseAddressList(r.email || "");
+    return addrs.length > 0;
+  });
+  const skipped = afterSuppression.length - validEmails.length;
+  if (skipped > 0) log(`Broadcast: ${skipped} row(s) with invalid email skipped.`, "warning");
+
+  if (!validEmails.length) { log("No valid recipients for broadcast.", "warning"); return; }
+
+  // Duplicate guard
+  const recentDupes = checkDuplicateSendHistory(validEmails);
+  if (recentDupes.length) {
+    const proceed = await showDuplicateWarningModal(recentDupes);
+    if (!proceed) { setMergeRunning(false); return; }
+  }
+
   // Confirm
-  const confirmed = await showConfirmModal(valid.length, valid.length,
-    null, null, /* broadcastMode = */ true);
+  const confirmed = await showConfirmModal(validEmails.length, validEmails.length,
+    null, /* broadcastMode = */ true);
   if (!confirmed) return;
 
   setMergeRunning(true);
@@ -3043,13 +3083,24 @@ async function handleBroadcast() {
     const replyTo   = document.getElementById("replyToInput").value.trim();
     const importance = document.getElementById("importanceSelect").value;
 
-    const bccAddresses = valid
-      .map(r => ({ emailAddress: { address: r.email, name: r.display_name || "" } }));
+    const bccAddresses = validEmails.flatMap(r =>
+      parseAddressList(r.email || "").map(entry => ({
+        emailAddress: { address: entry.emailAddress.address, name: r.display_name || "" }
+      }))
+    );
+
+    // Get sender address for undisclosed-recipients pattern
+    let senderEmail = "";
+    try {
+      senderEmail = Office.context.mailbox.userProfile.emailAddress || "";
+    } catch(e) { /* ignore */ }
 
     const message = {
       subject,
       body: { contentType: "HTML", content: bodyHtml },
-      toRecipients: [],
+      toRecipients: senderEmail
+        ? [{ emailAddress: { address: senderEmail, name: "Undisclosed Recipients" } }]
+        : [],
       bccRecipients: bccAddresses,
       importance,
     };
@@ -3074,9 +3125,9 @@ async function handleBroadcast() {
       body: JSON.stringify({ message, saveToSentItems: saveToSent }),
     });
 
-    if (res.ok || res.status === 202) {
-      log(`Broadcast sent to ${valid.length} recipients (BCC).`, "success");
-      recordSentEmails(valid.map(r => r.email));
+    if (res.ok) {
+      log(`Broadcast sent to ${validEmails.length} recipients (BCC).`, "success");
+      recordSentEmails(validEmails.map(r => r.email));
     } else {
       const err = await res.json().catch(() => ({}));
       log(`Broadcast failed: ${err.error?.message || res.status}`, "error");
@@ -3099,7 +3150,7 @@ async function searchDirectory(query) {
   el.innerHTML = '<p style="padding:8px;color:#605e5c;">Searching…</p>';
   try {
     const token = await getAccessToken();
-    const url = `https://graph.microsoft.com/v1.0/me/people?$search="${encodeURIComponent(query)}"&$select=displayName,givenName,surname,scoredEmailAddresses&$top=25`;
+    const url = `https://graph.microsoft.com/v1.0/me/people?$search=${encodeURIComponent(query)}&$select=displayName,givenName,surname,scoredEmailAddresses&$top=25`;
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${token}`, ConsistencyLevel: "eventual" }
     });
@@ -3156,10 +3207,17 @@ function importDirectorySelected() {
   });
   const csvInput = document.getElementById("csvInput");
   const existing = csvInput.value.trim();
-  if (existing) {
-    csvInput.value = existing + "\n" + rows.join("\n");
+  const emailHeader = "email,first_name,last_name";
+  const existingLines = existing.split("\n").map(l => l.trim()).filter(Boolean);
+  const existingHeader = existingLines[0] || "";
+
+  if (!existing || existingHeader === emailHeader) {
+    // Empty or already has matching header — append (or start fresh)
+    csvInput.value = (existing ? existing + "\n" : emailHeader + "\n") + rows.join("\n");
   } else {
-    csvInput.value = header + "\n" + rows.join("\n");
+    // Different header — start fresh, warn
+    log("Contact import: existing CSV has different columns — starting fresh with imported contacts.", "warning");
+    csvInput.value = emailHeader + "\n" + rows.join("\n");
   }
   csvInput.dispatchEvent(new Event("input"));
   document.getElementById("contactsModal").classList.add("hidden");
@@ -3175,7 +3233,7 @@ function populateInsertFieldSelect(headers) {
   sel.innerHTML = '<option value="">— pick field —</option>';
   // Smart tokens first
   smart.forEach(t => {
-    sel.innerHTML += `<option value="{{${t}}}" class="opt-smart">✨ {{${t}}}</option>`;
+    sel.innerHTML += `<option value="{{${t}}}">✨ {{${t}}}</option>`;
   });
   // CSV columns
   headers.forEach(h => {
