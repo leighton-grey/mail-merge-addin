@@ -639,3 +639,67 @@ body {
   min-height: 20px;
   line-height: 14px;
 }
+
+/* ─── v2.0.0 ADDITIONS ───────────────────────────────────────── */
+
+/* Opt-out list */
+#optoutList { font-size: 12px; }
+#optoutList div:hover { background: var(--bg-hover, #f5f5f5); }
+
+/* Fill-in modal fields */
+#fillInFields input { font-size: 13px; }
+
+/* Sending window / rate limit rows */
+#sendingWindowRow, #rateLimitRow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* opts-row spacing */
+.opts-row { margin-bottom: 4px; }
+
+/* toggle-label style */
+.toggle-label { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+
+/* CSS custom properties fallback */
+:root {
+  --border: #c8c6c4;
+  --bg-secondary: #f3f2f1;
+  --text-muted: #605e5c;
+  --bg-hover: #f5f5f5;
+  --accent: #534AB7;
+}
+
+/* ─── v2.2.0 ADDITIONS ───────────────────────────────────────── */
+
+/* Getting started banner (Feature 13) */
+.getting-started-banner { background: var(--bg-secondary, #f0f4ff); border: 1px solid var(--accent, #534AB7); border-radius: 6px; padding: 10px 14px; margin: 0 10px 10px 10px; font-size: 12px; line-height: 1.5; }
+.getting-started-banner ol { margin: 4px 0 8px 16px; padding: 0; }
+
+/* Preview paging (Feature 6) */
+.preview-paging { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12px; }
+.btn-sm { padding: 2px 8px; background: #fff; color: #323130; border: 1px solid #c8c6c4; border-radius: 3px; font-size: 11px; cursor: pointer; font-family: inherit; }
+.btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Tag chip keyboard focus (Feature 14) */
+.tag:focus { outline: 2px solid var(--accent, #534AB7); outline-offset: 1px; border-radius: 3px; }
+
+/* ─── v2.3.0 ADDITIONS ───────────────────────────────────────── */
+/* No new CSS rules in v2.3.0 — all changes are JS/HTML logic and security fixes. */
+
+/* ─── v2.4.0 ADDITIONS ───────────────────────────────────────── */
+
+/* UX 1: footer button row wraps on narrow panes */
+.merge-actions {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.merge-actions .btn-primary,
+.merge-actions .btn-secondary,
+.merge-actions button {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+/* Ensure footer buttons don't clip */
+.app-footer {
+  overflow: visible;
+}

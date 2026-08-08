@@ -9,7 +9,7 @@
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'self';
              script-src 'self' https://appsforoffice.microsoft.com https://ajax.aspnetcdn.com https://cdnjs.cloudflare.com;
-             connect-src 'self' https://graph.microsoft.com https://login.microsoftonline.com;
+             connect-src 'self' https://graph.microsoft.com https://login.microsoftonline.com https://cloudflare-dns.com;
              style-src 'self' 'unsafe-inline';
              img-src 'self' data:;" />
 
@@ -17,16 +17,19 @@
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js" type="text/javascript"></script>
 
   <!-- SheetJS — Excel parsing, loaded from CDN -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" type="text/javascript"></script>
+  <!-- TODO: add integrity="sha512-..." SRI hash once verified for production -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"
+          type="text/javascript"
+          crossorigin="anonymous"></script>
 
   <!-- App styles -->
-  <link rel="stylesheet" href="taskpane.css?v=1.9.1" />
+  <link rel="stylesheet" href="taskpane.css?v=2.4.0" />
 </head>
 <body>
   <div class="header">
     <span class="header-icon">✉</span>
     <span class="header-title">Mail Merge</span>
-    <span class="header-version">v1.9.1</span>
+    <span class="header-version">v2.4.0</span>
   </div>
 
   <div class="tab-bar" role="tablist">
@@ -40,6 +43,18 @@
     <!-- Tab: Recipients -->
     <div id="tab-recipients" class="tab-pane">
 
+      <!-- Getting started banner (Feature 13) -->
+      <div id="gettingStartedBanner" class="getting-started-banner hidden">
+        <div style="font-weight:600;margin-bottom:4px;">Welcome to Mail Merge</div>
+        <ol style="margin:4px 0 8px 16px;padding:0;font-size:12px;line-height:1.7;">
+          <li><strong>Recipients tab</strong>: Paste or upload your CSV file with an <em>email</em> column</li>
+          <li><strong>Compose tab</strong>: Write your email using <code>{{first_name}}</code> tokens</li>
+          <li><strong>Options tab</strong>: Configure scheduling, rate limits, and opt-out settings</li>
+          <li>Click <strong>Send Merge</strong> to send personalised emails to every row</li>
+        </ol>
+        <a id="dismissGettingStarted" href="#" style="font-size:11px;color:var(--text-muted);">Dismiss</a>
+      </div>
+
       <!-- CSV section -->
       <div class="section">
         <div class="csv-upload-row">
@@ -47,6 +62,7 @@
           <input type="file" id="csvFileInput" accept=".csv,.xlsx,.xls,text/csv" class="hidden" />
           <button class="btn-secondary" id="importContactsBtn">👤 From Contacts</button>
           <span class="hint-inline">or paste CSV below</span>
+          <a id="downloadSampleCsv" href="#" style="font-size:11px;color:var(--accent,#534AB7);text-decoration:none;margin-left:8px;" title="Download a sample CSV file">&#11015; Sample CSV</a>
           <span id="recipientCount" class="count-badge"></span>
         </div>
         <textarea id="csvInput" class="csv-area"
@@ -54,7 +70,7 @@
         <div class="csv-actions">
           <button class="btn-secondary" id="previewBtn">Preview</button>
           <button class="btn-secondary" id="mapFieldsBtn" style="display:none;">⇄ Map fields</button>
-          <span class="hint" style="flex:1;margin:0;font-size:10px">Headers required: <code>email</code>. Optional: <code>cc</code> <code>bcc</code> <code>attachment</code> <code>display_name</code> <code>salutation</code> <code>first_name</code> <code>last_name</code> <code>gender</code> <code>skip_if</code> <code>send_at</code>. Delimiters: semicolon, comma, or space.</span>
+          <span class="hint" style="flex:1;margin:0;font-size:10px">Headers required: <code>email</code>. Optional: <code>cc</code> <code>bcc</code> <code>attachment</code> <code>display_name</code> <code>salutation</code> <code>first_name</code> <code>last_name</code> <code>gender</code> <code>skip_if</code> <code>send_at</code>. Auto-detects comma, semicolon, or tab delimiters.</span>
         </div>
       </div>
 
@@ -151,14 +167,14 @@
 
         <label class="label" style="margin-top:10px">Field tags</label>
         <div id="tagBar" class="tag-bar">
-          <span class="tag" data-tag="{{first_name}}">{{first_name}}</span>
-          <span class="tag" data-tag="{{last_name}}">{{last_name}}</span>
-          <span class="tag" data-tag="{{email}}">{{email}}</span>
-          <span class="tag" data-tag="{{company}}">{{company}}</span>
-          <span class="tag" data-tag="{{title}}">{{title}}</span>
-          <span class="tag tag-smart" data-tag="{{greeting_line}}">{{greeting_line}}</span>
-          <span class="tag tag-smart" data-tag="{{today}}">{{today}}</span>
-          <span class="tag tag-smart" data-tag="{{now}}">{{now}}</span>
+          <span class="tag" data-tag="{{first_name}}" tabindex="0" role="button" aria-label="Insert first_name token">{{first_name}}</span>
+          <span class="tag" data-tag="{{last_name}}" tabindex="0" role="button" aria-label="Insert last_name token">{{last_name}}</span>
+          <span class="tag" data-tag="{{email}}" tabindex="0" role="button" aria-label="Insert email token">{{email}}</span>
+          <span class="tag" data-tag="{{company}}" tabindex="0" role="button" aria-label="Insert company token">{{company}}</span>
+          <span class="tag" data-tag="{{title}}" tabindex="0" role="button" aria-label="Insert title token">{{title}}</span>
+          <span class="tag tag-smart" data-tag="{{greeting_line}}" tabindex="0" role="button" aria-label="Insert greeting_line token">{{greeting_line}}</span>
+          <span class="tag tag-smart" data-tag="{{today}}" tabindex="0" role="button" aria-label="Insert today token">{{today}}</span>
+          <span class="tag tag-smart" data-tag="{{now}}" tabindex="0" role="button" aria-label="Insert now token">{{now}}</span>
         </div>
         <div class="custom-tag-row">
           <input type="text" id="customTagInput" class="input input-inline" placeholder="custom_field_name" />
@@ -206,6 +222,17 @@
     <div id="tab-options" class="tab-pane hidden">
 
       <div class="section">
+        <div class="opts-row">
+          <label class="toggle-label">
+            <input type="checkbox" id="groupByEmail"> Group rows by email (many-to-one merge)
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Rows sharing the same email address are merged into one email. Use <code>{{merge_table}}</code> in your template to insert a table of all rows.
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
         <!-- 2-column checkbox grid -->
         <div class="opts-grid">
           <label class="checkbox-label"><input type="checkbox" id="saveToSentItems" checked />Save to Sent</label>
@@ -236,7 +263,9 @@
         <!-- Scheduling accordion -->
         <div class="accordion" style="margin-top:10px;">
           <button class="accordion-hdr" data-accordion="scheduling">
-            Scheduling <span class="accordion-chevron">›</span>
+            <span>Scheduling</span>
+            <span id="schedulingActiveBadge" class="hidden" style="font-size:10px;background:#0078d4;color:#fff;border-radius:8px;padding:1px 6px;margin-left:6px;">ON</span>
+            <span class="accordion-chevron">›</span>
           </button>
           <div id="accordion-scheduling" class="accordion-body hidden">
             <label class="checkbox-label">
@@ -255,13 +284,25 @@
               <input type="datetime-local" id="expiryDateTimeInput" class="input" />
               <p class="hint">Message will expire (become undeliverable) after this date.</p>
             </div>
+            <div class="opts-row" style="margin-top:8px;">
+              <label class="toggle-label">
+                <input type="checkbox" id="sendingWindowEnabled"> Restrict sends to business hours
+              </label>
+            </div>
+            <div id="sendingWindowRow" class="schedule-row hidden" style="margin-top:4px;">
+              <label>Window start: <input type="time" id="windowStart" value="09:00"></label>
+              <label style="margin-left:10px;">Window end: <input type="time" id="windowEnd" value="17:00"></label>
+              <div style="margin-top:4px;font-size:11px;color:var(--text-muted)">Sends outside this window will pause until the window opens (Mon–Fri only).</div>
+            </div>
           </div>
         </div>
 
         <!-- Advanced accordion -->
         <div class="accordion">
           <button class="accordion-hdr" data-accordion="advanced">
-            Advanced <span class="accordion-chevron">›</span>
+            <span>Advanced</span>
+            <span id="rateLimitActiveBadge" class="hidden" style="font-size:10px;background:#0078d4;color:#fff;border-radius:8px;padding:1px 6px;margin-left:6px;">RATE LIMIT</span>
+            <span class="accordion-chevron">›</span>
           </button>
           <div id="accordion-advanced" class="accordion-body hidden">
 
@@ -293,6 +334,44 @@
             <label class="label" style="margin-top:8px;">Batch delay <span id="batchDelayLabel" class="hint-inline">(1.5 s between batches)</span></label>
             <input type="range" id="batchDelayInput" min="0" max="10" step="0.5" value="1.5" class="range-input" />
 
+            <div class="opts-row" style="margin-top:6px;">
+              <label>Send delay jitter:
+                <input type="number" id="jitterMinInput" min="0" max="60" value="0" style="width:45px"> –
+                <input type="number" id="jitterMaxInput" min="0" max="60" value="0" style="width:45px"> sec
+              </label>
+              <div style="font-size:11px;color:var(--text-muted)">Random extra delay added per email (0 = off)</div>
+            </div>
+
+            <div class="opts-row" style="margin-top:8px;">
+              <label>Max emails/hour: <input type="number" id="maxPerHour" min="0" max="500" value="0" style="width:60px"> <span style="font-size:11px;color:var(--text-muted)">(0 = unlimited)</span></label>
+            </div>
+            <div class="opts-row" style="margin-top:4px;">
+              <label>Daily cap: <input type="number" id="dailyCap" min="0" max="10000" value="0" style="width:60px"> <span style="font-size:11px;color:var(--text-muted)">(0 = unlimited)</span></label>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Opt-Out List accordion -->
+        <div class="accordion">
+          <button class="accordion-hdr" data-accordion="optout">
+            <span>Opt-Out / Unsubscribe List</span>
+            <span class="accordion-chevron">›</span>
+          </button>
+          <div class="accordion-body hidden" id="accordion-optout">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">
+              Email addresses on this list are permanently skipped in all merges.
+            </div>
+            <div style="display:flex;gap:6px;margin-bottom:6px;">
+              <input type="email" id="optoutAddInput" placeholder="email@example.com" style="flex:1">
+              <button id="optoutAddBtn" class="btn-secondary">Add</button>
+            </div>
+            <div id="optoutList" style="max-height:120px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;padding:4px;font-size:12px;margin-bottom:6px;"></div>
+            <div style="display:flex;gap:6px;">
+              <button id="optoutImportBtn" class="btn-secondary">Import from CSV column</button>
+              <button id="optoutClearBtn" class="btn-secondary btn-danger">Clear all</button>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;" id="optoutCount">0 addresses</div>
           </div>
         </div>
 
@@ -306,14 +385,23 @@
   <div class="app-footer">
     <!-- Progress bar (hidden until merge runs) -->
     <div id="progressContainer" class="progress-container hidden" style="margin-bottom:6px;">
-      <div id="progressFill" class="progress-fill"></div>
+      <div id="progressFill" class="progress-fill"
+           role="progressbar"
+           aria-valuenow="0"
+           aria-valuemin="0"
+           aria-valuemax="100"
+           aria-label="Merge progress"></div>
       <span id="progressLabel" class="progress-label">0%</span>
     </div>
 
     <!-- Action buttons row -->
     <div class="merge-actions">
-      <button id="testSendBtn" class="btn-secondary">📨 Test</button>
-      <button id="previewAllBtn" class="btn-secondary">👁 Preview</button>
+      <select id="testRowSelect" title="Row to use for test send" style="font-size:11px;padding:2px 4px;max-width:130px;border:1px solid #c8c6c4;border-radius:3px;background:#faf9f8;color:#323130;font-family:inherit;">
+        <option value="0">Row 1 (default)</option>
+      </select>
+      <button id="testSendBtn" class="btn-secondary">&#128232; Test</button>
+      <button id="previewAllBtn" class="btn-secondary">&#128065; Preview</button>
+      <button id="simulateBtn" class="btn-secondary" title="Run merge without sending — download per-recipient preview as CSV">Simulate</button>
       <button id="saveDraftsBtn" class="btn-secondary">📝 Drafts</button>
       <button id="broadcastBtn" class="btn-secondary">📢 Broadcast</button>
       <button id="mergeBtn" class="btn-primary">▶ Run mail merge</button>
@@ -346,7 +434,7 @@
 
   <!-- Preview all modal -->
   <div id="previewModal" class="modal-overlay hidden">
-    <div class="modal modal-preview">
+    <div class="modal modal-preview" role="dialog" aria-modal="true" aria-labelledby="previewCounter">
       <div class="preview-modal-header">
         <span id="previewCounter" class="preview-counter">Preview 1 / 0</span>
         <button id="previewCloseBtn" class="btn-icon" title="Close">✕</button>
@@ -364,8 +452,8 @@
 
   <!-- Confirmation modal -->
   <div id="confirmModal" class="modal-overlay hidden">
-    <div class="modal">
-      <p class="modal-title">Ready to send?</p>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmModalTitle">
+      <p id="confirmModalTitle" class="modal-title">Ready to send?</p>
       <p id="confirmText" class="modal-body"></p>
       <div class="modal-actions">
         <button id="confirmSendBtn" class="btn-primary">Send</button>
@@ -380,7 +468,8 @@
 
   <!-- Contacts picker modal -->
   <div id="contactsModal" class="modal-overlay hidden">
-    <div class="modal" style="width:320px;max-height:480px;display:flex;flex-direction:column;">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="contactsModalTitle" style="width:320px;max-height:480px;display:flex;flex-direction:column;">
+      <span id="contactsModalTitle" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;">Contacts Picker</span>
       <div style="display:flex;gap:0;margin-bottom:8px;border-bottom:1px solid #edebe9;">
         <button class="tab-btn active" id="contactsTabContacts" style="flex:none;padding:6px 12px;font-size:12px;">Contacts</button>
         <button class="tab-btn" id="contactsTabGroups" style="flex:none;padding:6px 12px;font-size:12px;">Groups</button>
@@ -405,9 +494,9 @@
 
   <!-- Match Fields modal -->
   <div id="matchFieldsModal" class="modal-overlay hidden">
-    <div class="modal" style="width:340px;max-height:500px;display:flex;flex-direction:column;">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="matchFieldsModalTitle" style="width:340px;max-height:500px;display:flex;flex-direction:column;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-        <strong style="font-size:13px;">Map CSV columns to fields</strong>
+        <strong id="matchFieldsModalTitle" style="font-size:13px;">Map CSV columns to fields</strong>
         <button class="btn-icon" id="matchFieldsCloseBtn">✕</button>
       </div>
       <p class="hint" style="margin-bottom:8px;">For each field, choose which CSV column contains that data. Leave "— skip —" to ignore a field.</p>
@@ -421,9 +510,9 @@
 
   <!-- Check for Errors modal -->
   <div id="checkErrorsModal" class="modal-overlay hidden">
-    <div class="modal" style="width:360px;max-height:520px;display:flex;flex-direction:column;">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="checkErrorsModalTitle" style="width:360px;max-height:520px;display:flex;flex-direction:column;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <strong style="font-size:13px;">Pre-flight check</strong>
+        <strong id="checkErrorsModalTitle" style="font-size:13px;">Pre-flight check</strong>
         <button class="btn-icon" id="checkErrorsCloseBtn">✕</button>
       </div>
       <div id="checkErrorsBody" style="flex:1;overflow-y:auto;font-size:12px;"></div>
@@ -432,8 +521,8 @@
 
   <!-- Duplicate send warning modal -->
   <div id="dupeSendModal" class="modal-overlay hidden">
-    <div class="modal">
-      <p class="modal-title">⚠ Recent send detected</p>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dupeSendModalTitle">
+      <p id="dupeSendModalTitle" class="modal-title">⚠ Recent send detected</p>
       <div id="dupeSendBody" class="modal-body"></div>
       <div class="modal-actions">
         <button id="dupeSendProceedBtn" class="btn-primary">Send anyway</button>
@@ -442,7 +531,32 @@
     </div>
   </div>
 
+  <!-- Fill-in values modal (Feature 6) -->
+  <div class="modal-overlay hidden" id="fillInModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="fillInModalTitle" style="min-width:340px;max-width:480px;">
+      <h3 id="fillInModalTitle" style="margin:0 0 12px">Fill In Values</h3>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Complete these values before sending. They will be inserted into every email.</p>
+      <div id="fillInFields"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button id="fillInCancelBtn" class="btn-secondary">Cancel</button>
+        <button id="fillInOkBtn" class="btn-primary" style="width:auto;padding:8px 16px;">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pre-send confirmation modal (Feature C) -->
+  <div class="modal-overlay hidden" id="preSendModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="preSendModalTitle" style="min-width:320px;max-width:440px;">
+      <h3 id="preSendModalTitle" style="margin:0 0 12px">Ready to Send</h3>
+      <div id="preSendSummary" style="font-size:13px;line-height:1.6;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button id="preSendCancelBtn" class="btn-secondary">Cancel</button>
+        <button id="preSendConfirmBtn" class="btn-primary">Send Now</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Core engine -->
-  <script src="taskpane.js?v=1.9.1" type="text/javascript"></script>
+  <script src="taskpane.js?v=2.4.0" type="text/javascript"></script>
 </body>
 </html>

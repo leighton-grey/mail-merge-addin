@@ -1,7 +1,37 @@
-/* Mail Merge Engine v1.9.1
+/* Mail Merge Engine v2.4.0
  * Auth: Office.js SSO -> Microsoft Graph API
  * Batching: 20 requests per Graph $batch call (reduced dynamically when attachment present)
  * Privacy: Subject + CSV cached in browser localStorage only. Nothing stored server-side.
+ *
+ * v2.4.0 — 6 bug fixes (merge complete timer guard, cancel vs done, bare localStorage,
+ *   failedRecipients cleared on reload, mergeInProgress user message, broadcast re-entrancy);
+ *   10 UX/a11y fixes (footer flex-wrap, ARIA progress bar, static tag chip keyboard, modal ARIA
+ *   roles+labels, Escape key modal dismiss, send report columns, scheduling active badge, retry
+ *   button cleared on reload, template restores expand accordion, CSV paste change event)
+ *
+ * v2.3.0 — Logical fixes (sendBatchWithRetry non-recursive, daily cap preserves failed list,
+ *   broadcast skip_if, record_count mixed runs, inverted window guard, broadcast sendOutcomes,
+ *   simulate skip_if parity, CSV row stamps); Performance (simulate async yield, innerHTML loop
+ *   batching, TOKEN_REGEX hoisted, _originalIndex stamp, saveRateLimitState debounced);
+ *   Security (handleCheckErrors XSS, testRowSelect XSS, unsubscribe_link href escape,
+ *   fill-in secondary substitution, DNS disclosure log, CRLF header strip, EMAIL_REGEX
+ *   tightened, CDN crossorigin)
+ *
+ * v2.2.0 — 16 QoL features: test send row selector, broadcast BCC cap warning, sample CSV download,
+ *   merge_table/unsubscribe_link in UI, progress bar persist, preview paging, sendOutcomes
+ *   accumulation, rate limit persistence, auth expiry guidance, simulate/dry-run mode,
+ *   template saves scheduling settings, mixed send breakdown in confirmation, first-run banner,
+ *   tag keyboard nav, modal focus trap, ISO date pruning fix
+ *
+ * v2.1.1 — 14 bug fixes: double-send guard, broadcast opt-out check, merge try/finally,
+ *   429 retry depth limit, broadcast empty toRecipients, fill-in $ replacement, retry finally,
+ *   contacts pagination, pre-send time estimate, DKIM selector2, optout XSS, group empty email log,
+ *   spurious setMergeRunning, sendOutcomes accumulation
+ *
+ * v2.1.0 — 8 bug fixes (insertTag Mac coercion, fill-in isolation, merge table HTML escaping,
+ *   CSV delimiter auto-detect, broadcast plain-text strip, checkErrors false positives,
+ *   confirm modal, optional chaining compat); 5 features (unsubscribe_link token,
+ *   pre-send confirmation, send jitter, signature preservation warning, CSV auto-detect)
  *
  * v1.2.0 — CC/BCC, Reply-To, per-recipient attachments, {{greeting_line}}, Send As, dedup, schedule
  * v1.2.1 — Importance, read/delivery receipts, plain text mode, custom X- headers, multi-TO per row
@@ -52,13 +82,24 @@
  * v1.9.0 — 8 bug fixes (record_num offset, test send tokens, checkbox state, CSV escaping, dead code);
  *           broadcast mode, multi-criteria AND/OR filter, duplicate send guard, GAL directory import.
  * v1.9.1 — 15 bug fixes: initTabs scope, validateRecipients null guard, broadcast validation/suppression/multi-TO/toRecipients, retry restore logic, stop-button race, directory search encoding, duplicate guard multi-TO, contact import header matching, log row numbers, opt-smart class, dead code cleanup
+ * v1.9.2 — 11 open bug fixes (broadcast options/images/suppression, retry/draft CSV restore, filter reset, preview-all filtered set, record_num offset, test send guard); Mac compatibility (setSelectedDataAsync text coercion, setAsync image warning, error 13012); Exchange/hybrid detection (restUrl startup check, IMAP messaging)
+ * v2.0.0 — 7 new features:
+ *   1. Token fallback values: {{field|Fallback Text}} — empty fields use the fallback literal
+ *   2. Sending window / business hours: restrict sends to Mon–Fri 09:00–17:00 (configurable)
+ *   3. Max emails per hour / daily cap: rate limiting with automatic pause
+ *   4. Many-to-one grouped row merge: group rows by email, {{merge_table}} token
+ *   5. Managed persistent opt-out / unsubscribe list: localStorage suppression with UI
+ *   6. Fill-in prompt at merge start: {{fill_in:Prompt}} tokens show modal before send
+ *   7. SPF/DKIM/DMARC DNS pre-flight check: warns for large sends (500+) if DNS records missing
  */
 
 const GRAPH_BATCH_URL     = "https://graph.microsoft.com/v1.0/$batch";
 const BATCH_SIZE          = 20;
 const BATCH_DELAY_MS      = 1500;   // default — overridden at runtime by batchDelayInput
 const MAX_RETRIES         = 3;
-const EMAIL_REGEX         = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const EMAIL_REGEX         = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+// P3: hoisted to module scope — prevents recompilation on every personalize() call
+const TOKEN_REGEX         = /\{\{([^}|]+)(?:\|([^}]*))?\}\}/gi;
 const MAX_RECIPIENTS      = 10000;
 const MAX_PAYLOAD_BYTES   = 3.5 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024;
@@ -89,9 +130,15 @@ const CANONICAL_FIELDS = [
 
 const DEFAULT_TAGS = [
   "{{first_name}}", "{{last_name}}", "{{email}}", "{{company}}", "{{title}}",
-  "{{greeting_line}}", "{{today}}", "{{now}}", "{{record_num}}", "{{record_count}}"
+  "{{greeting_line}}", "{{today}}", "{{now}}", "{{record_num}}", "{{record_count}}",
+  "{{merge_table}}", "{{unsubscribe_link}}"
 ];
 
+let mergeInProgress           = false;  // BUG 1: double-send guard
+let broadcastInProgress       = false;  // UX Bug 6: re-entrancy guard for handleBroadcast
+let _mergeCompletedSuccessfully = false; // Feature 5: suppress progress hide on success
+let previewTablePage          = 0;      // Feature 6: preview table paging
+const PREVIEW_PAGE_SIZE       = 10;     // Feature 6: rows per page
 let parsedRecipients          = [];
 let cancelRequested           = false;
 let subjectHasFocus           = false;
@@ -104,6 +151,7 @@ let sendOutcomes              = [];   // { email, status, timestamp, error? } �
 let previewBodyTemplate       = "";   // cached body for preview-all mode
 const warnedMissingAttachments = new Set(); // deduplicate per-filename warnings across a merge run
 let previewIndex        = 0;    // current row index in preview navigator
+let previewRecipients   = [];   // filtered recipient set used by preview-all modal (A10)
 
 let fieldMapping = {}; // { canonicalName: csvColumnName }
 let greetingConfig = { format: "dear_sal_last", fallback: "Dear Valued Customer" };
@@ -123,6 +171,26 @@ let selectedDirectory = new Set();
 Office.onReady((info) => {
   if (info.host === Office.HostType.Outlook) {
     log("Office.js ready. Host: Outlook.", "info");
+
+    // C1 / C2: Check for Exchange Online mailbox — restUrl is null for IMAP/Gmail-only accounts
+    const restUrl = Office.context.mailbox.restUrl;
+    if (!restUrl) {
+      const banner = document.createElement("div");
+      banner.style.cssText = "background:#eb5757;color:#fff;padding:10px 14px;font-size:12px;line-height:1.5;";
+      banner.innerHTML = `<strong>&#9888; No Exchange Online mailbox detected.</strong><br>
+        This add-in sends email via Microsoft Graph and requires an Exchange Online mailbox.
+        Your Microsoft 365 account may not include Exchange Online, or you may be signed in
+        with a non-Exchange account. If your primary email is Gmail or another IMAP account,
+        this add-in only works when composing from a Microsoft 365 Exchange Online account.
+        Please contact your IT administrator.<br>
+        <a href="https://docs.microsoft.com/en-us/microsoft-365/admin/misc/why-cant-i-do-mail-merge"
+           style="color:#fff;text-decoration:underline;" target="_blank">Learn more</a>`;
+      document.body.insertBefore(banner, document.body.firstChild);
+      ["mergeBtn","testSendBtn","previewAllBtn","saveDraftsBtn","broadcastBtn"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = true;
+      });
+    }
 
     document.getElementById("mergeBtn").addEventListener("click", handleMergeClick);
     document.getElementById("stopBtn").addEventListener("click", handleStop);
@@ -157,11 +225,21 @@ Office.onReady((info) => {
 
     document.getElementById("scheduleEnabled").addEventListener("change", (e) => {
       document.getElementById("scheduleRow").classList.toggle("hidden", !e.target.checked);
+      updateSchedulingBadge();
     });
 
     document.getElementById("expiryEnabled").addEventListener("change", (e) => {
       document.getElementById("expiryRow").classList.toggle("hidden", !e.target.checked);
     });
+
+    const sendingWindowEnabledEl = document.getElementById("sendingWindowEnabled");
+    if (sendingWindowEnabledEl) {
+      sendingWindowEnabledEl.addEventListener("change", function(e) {
+        const sendingWindowRowEl = document.getElementById("sendingWindowRow");
+        if (sendingWindowRowEl) sendingWindowRowEl.classList.toggle("hidden", !e.target.checked);
+        updateSchedulingBadge();
+      });
+    }
 
     document.getElementById("customHeadersEnabled").addEventListener("change", (e) => {
       document.getElementById("customHeadersRow").classList.toggle("hidden", !e.target.checked);
@@ -190,7 +268,7 @@ Office.onReady((info) => {
       if (previewIndex > 0) { previewIndex--; renderPreviewEntry(); }
     });
     document.getElementById("previewNextBtn").addEventListener("click", () => {
-      if (previewIndex < parsedRecipients.length - 1) { previewIndex++; renderPreviewEntry(); }
+      if (previewIndex < previewRecipients.length - 1) { previewIndex++; renderPreviewEntry(); }
     });
 
     // Batch delay label live update
@@ -218,14 +296,16 @@ Office.onReady((info) => {
       lsSet(LS_KEY_SUBJECT, document.getElementById("subjectInput").value);
     });
 
-    document.getElementById("csvInput").addEventListener("input", () => {
-      lsSet(LS_KEY_CSV, document.getElementById("csvInput").value);
-    });
+    const _csvInputEl = document.getElementById("csvInput");
+    const _saveCsv = () => lsSet(LS_KEY_CSV, _csvInputEl.value);
+    _csvInputEl.addEventListener("input", _saveCsv);
+    _csvInputEl.addEventListener("change", _saveCsv);
 
     restoreLocalState();
 
     initTabs();
     initAccordions();
+    initOptOutUI();
 
     document.getElementById("toggleLogBtn").addEventListener("click", () => {
       document.getElementById("fullLogArea").classList.toggle("hidden");
@@ -289,7 +369,7 @@ Office.onReady((info) => {
     // Check for Errors (Feature 1 v1.8)
     document.getElementById("checkErrorsBtn").addEventListener("click", handleCheckErrors);
     document.getElementById("checkErrorsCloseBtn").addEventListener("click", () => {
-      document.getElementById("checkErrorsModal").classList.add("hidden");
+      _closeModalWithTrap("checkErrorsModal"); // Feature 15
     });
 
     // Insert field at cursor (Feature 4 v1.8)
@@ -364,6 +444,84 @@ Office.onReady((info) => {
     document.getElementById("directorySearch").addEventListener("input", (e) => {
       clearTimeout(directorySearchTimer);
       directorySearchTimer = setTimeout(() => searchDirectory(e.target.value.trim()), 400);
+    });
+
+    // UX 3: keyboard activation for static tag chips (Enter / Space)
+    document.addEventListener("keydown", (e) => {
+      if ((e.key === "Enter" || e.key === " ") && e.target.classList.contains("tag")) {
+        e.preventDefault();
+        e.target.click();
+      }
+    });
+
+    // UX 5: Escape key closes the topmost visible modal
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      const visibleModals = [
+        "fillInModal", "preSendModal", "confirmModal", "dupeSendModal",
+        "checkErrorsModal", "previewModal", "matchFieldsModal", "contactsModal"
+      ];
+      for (const id of visibleModals) {
+        const el = document.getElementById(id);
+        if (el && !el.classList.contains("hidden")) {
+          const cancelBtn = el.querySelector(
+            "#fillInCancelBtn, #preSendCancelBtn, #confirmCancelBtn, #dupeSendCancelBtn, " +
+            "#checkErrorsCloseBtn, #previewCloseBtn, #matchFieldsCancelBtn, #contactsCloseBtn, " +
+            "button[class*='cancel'], button[class*='close']"
+          );
+          if (cancelBtn) cancelBtn.click();
+          else el.classList.add("hidden");
+          break;
+        }
+      }
+    });
+
+    // UX 8: hide retry button when CSV textarea is manually cleared
+    document.getElementById("csvInput")?.addEventListener("input", () => {
+      if (!document.getElementById("csvInput").value.trim()) {
+        document.getElementById("retryFailedBtn")?.classList.add("hidden");
+        failedRecipients = [];
+      }
+    });
+
+    // Feature 8: load persisted rate limit state
+    loadRateLimitState();
+
+    // UX 7: wire rate limit badge to maxPerHour and dailyCap inputs
+    document.getElementById("maxPerHour")?.addEventListener("input", updateRateLimitBadge);
+    document.getElementById("dailyCap")?.addEventListener("input", updateRateLimitBadge);
+
+    // Feature 3: sample CSV download
+    document.getElementById("downloadSampleCsv")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      const sampleCsv = [
+        "email,first_name,last_name,company,title",
+        "alice@example.com,Alice,Smith,Acme Corp,Director",
+        "bob@example.com,Bob,Jones,Globex,Manager",
+        "carol@example.com,Carol,Williams,Initech,Analyst"
+      ].join("\r\n");
+      const blob = new Blob([sampleCsv], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "mail-merge-sample.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    // Feature 10: simulate button
+    document.getElementById("simulateBtn")?.addEventListener("click", handleSimulate);
+
+    // Feature 13: getting started banner
+    const hasSeenWelcome = lsGet("mm_welcome_dismissed", null);
+    const hasCsv = !!lsGet(LS_KEY_CSV, null);
+    if (!hasSeenWelcome && !hasCsv) {
+      document.getElementById("gettingStartedBanner")?.classList.remove("hidden");
+    }
+    document.getElementById("dismissGettingStarted")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      document.getElementById("gettingStartedBanner")?.classList.add("hidden");
+      lsSet("mm_welcome_dismissed", "1");
     });
   }
 });
@@ -507,6 +665,16 @@ function getTemplateState() {
     sendAs:          document.getElementById("sendAsInput").value,
     greetingFormat:  greetingConfig.format,
     greetingFallback: greetingConfig.fallback,
+    // Feature 11: scheduling and rate limit settings
+    scheduleEnabled:      document.getElementById("scheduleEnabled")?.checked || false,
+    scheduledTime:        document.getElementById("scheduledTime")?.value || "",
+    sendingWindowEnabled: document.getElementById("sendingWindowEnabled")?.checked || false,
+    windowStart:          document.getElementById("windowStart")?.value || "09:00",
+    windowEnd:            document.getElementById("windowEnd")?.value || "17:00",
+    maxPerHour:           document.getElementById("maxPerHour")?.value || "0",
+    dailyCap:             document.getElementById("dailyCap")?.value || "0",
+    jitterMin:            document.getElementById("jitterMinInput")?.value || "0",
+    jitterMax:            document.getElementById("jitterMaxInput")?.value || "0",
   };
 }
 
@@ -538,6 +706,55 @@ function applyTemplateState(state) {
     greetingConfig.fallback = state.greetingFallback;
     document.getElementById("greetingFallback").value = state.greetingFallback;
   }
+  // Feature 11: restore scheduling and rate limit settings
+  if (state.scheduleEnabled !== undefined) {
+    const el = document.getElementById("scheduleEnabled");
+    if (el) { el.checked = state.scheduleEnabled; el.dispatchEvent(new Event("change")); }
+  }
+  if (state.scheduledTime) { const el = document.getElementById("scheduledTime"); if (el) el.value = state.scheduledTime; }
+  if (state.sendingWindowEnabled !== undefined) {
+    const el = document.getElementById("sendingWindowEnabled");
+    if (el) { el.checked = state.sendingWindowEnabled; el.dispatchEvent(new Event("change")); }
+  }
+  if (state.windowStart) { const el = document.getElementById("windowStart"); if (el) el.value = state.windowStart; }
+  if (state.windowEnd)   { const el = document.getElementById("windowEnd");   if (el) el.value = state.windowEnd; }
+  if (state.maxPerHour !== undefined) { const el = document.getElementById("maxPerHour"); if (el) el.value = state.maxPerHour; }
+  if (state.dailyCap    !== undefined) { const el = document.getElementById("dailyCap");    if (el) el.value = state.dailyCap; }
+  if (state.jitterMin   !== undefined) { const el = document.getElementById("jitterMinInput"); if (el) el.value = state.jitterMin; }
+  if (state.jitterMax   !== undefined) { const el = document.getElementById("jitterMaxInput"); if (el) el.value = state.jitterMax; }
+
+  // UX 9: if scheduling settings were restored as active, expand the scheduling accordion
+  if (state.scheduleEnabled || state.sendingWindowEnabled) {
+    const schBody = document.getElementById("accordion-scheduling");
+    if (schBody && schBody.classList.contains("hidden")) {
+      schBody.classList.remove("hidden");
+      const schHdr = schBody.previousElementSibling;
+      if (schHdr) {
+        schHdr.classList.add("open");
+        const schChevron = schHdr.querySelector(".accordion-chevron");
+        if (schChevron) schChevron.textContent = "▾";
+      }
+    }
+  }
+  // UX 9: if rate limit settings were restored as active, expand the advanced accordion
+  const mphRestored = parseInt(state.maxPerHour || "0", 10);
+  const dcRestored  = parseInt(state.dailyCap   || "0", 10);
+  if (mphRestored > 0 || dcRestored > 0) {
+    const advBody = document.getElementById("accordion-advanced");
+    if (advBody && advBody.classList.contains("hidden")) {
+      advBody.classList.remove("hidden");
+      const advHdr = advBody.previousElementSibling;
+      if (advHdr) {
+        advHdr.classList.add("open");
+        const advChevron = advHdr.querySelector(".accordion-chevron");
+        if (advChevron) advChevron.textContent = "▾";
+      }
+    }
+  }
+
+  // UX 7: refresh badges after template restore
+  updateSchedulingBadge();
+  updateRateLimitBadge();
 }
 
 function saveTemplate() {
@@ -679,6 +896,16 @@ async function loadBodyFromTemplate() {
   const templates = lsGet(LS_KEY_TEMPLATES, {});
   const tpl = templates[name];
   if (!tpl || !tpl.body) { log(`Template "${name}" has no saved body.`, "warning"); return; }
+
+  // B2: On Mac, setAsync with HTML coercion can corrupt embedded image src attributes.
+  const isMac = Office.context.platform === Office.PlatformType.Mac;
+  if (isMac && tpl.body.match(/<img/i)) {
+    log("Warning: Mac: loading a body template with embedded images may corrupt image links in the sent email (known Office.js limitation on Mac). Proceeding anyway.", "warning");
+  }
+
+  // Signature preservation warning — loading a template replaces the entire compose body on all platforms
+  log("ℹ Loading template will replace the current compose body (including your signature). Tip: place your signature at the bottom of the template to preserve it.", "info");
+
   try {
     await setComposeBodyAsync(tpl.body);
     log(`Body loaded from template "${name}".`, "success");
@@ -715,17 +942,30 @@ function setComposeBodyAsync(html) {
 /* ─── SAVE AS DRAFTS (Feature 5) ───────────────────────────────── */
 
 async function handleSaveDrafts() {
+  const savedCsvText = document.getElementById("csvInput").value;
+  const savedRecipients = parsedRecipients.slice();
   draftsMode = true;
   try {
     await handleMergeClick();
   } finally {
     draftsMode = false;
+    // A8: Restore if handleMergeClick cleared it on zero-failure completion
+    if (!document.getElementById("csvInput").value && savedCsvText) {
+      document.getElementById("csvInput").value = savedCsvText;
+      lsSet(LS_KEY_CSV, savedCsvText);
+      parsedRecipients = savedRecipients;
+    }
   }
 }
 
 /* ─── TEST SEND ────────────────────────────────────────────────── */
 
 async function handleTestSend() {
+  // A1: Re-entrancy guard — disable button for the duration
+  document.getElementById("testSendBtn").disabled = true;
+  const savedFillIn = window._fillInValues;
+  window._fillInValues = null;
+  try {
   const subjectTemplate = document.getElementById("subjectInput").value.trim();
   if (!subjectTemplate) { log("Subject line is empty.", "error"); return; }
   if (parsedRecipients.length === 0) {
@@ -736,7 +976,12 @@ async function handleTestSend() {
   const selfEmail = Office.context.mailbox.userProfile.emailAddress;
   if (!selfEmail) { log("Could not determine your email address.", "error"); return; }
 
-  log(`Test send: personalising with row 1 data and sending to ${selfEmail}...`, "info");
+  // Feature 1: use selected row index
+  const rowIdx = parseInt(document.getElementById("testRowSelect")?.value || "0", 10);
+  const sample = parsedRecipients[Math.min(rowIdx, parsedRecipients.length - 1)] || parsedRecipients[0];
+  const displayRowNum = rowIdx + 1;
+
+  log(`Test send: personalising with row ${displayRowNum} data and sending to ${selfEmail}...`, "info");
 
   let emailBodyTemplate = "";
   try {
@@ -748,9 +993,8 @@ async function handleTestSend() {
     });
   } catch (err) { log(`Body read error: ${err.message}`, "error"); return; }
 
-  const sample  = parsedRecipients[0];
   const sampleWithMeta = Object.assign({}, sample, {
-    record_num:   "1",
+    record_num:   String(rowIdx + 1),
     record_count: String(parsedRecipients.length || 1)
   });
   const subject = personalize(subjectTemplate, sampleWithMeta, false);  // plain text — no HTML escaping
@@ -840,17 +1084,29 @@ async function handleTestSend() {
   } catch (err) {
     log(`Test send failed: ${err.message}`, "error");
   }
+  } finally {
+    // A1: Re-enable button regardless of outcome
+    window._fillInValues = savedFillIn;
+    document.getElementById("testSendBtn").disabled = false;
+  }
 }
 
 /* ─── PREVIEW ALL ──────────────────────────────────────────────── */
 
 async function handlePreviewAll() {
-  if (parsedRecipients.length === 0) {
-    log("Load recipients first — preview requires at least one row.", "error");
+  // A10: Use filtered/sorted set so preview matches what will actually be sent
+  const toPreview = getFilteredSortedRecipients();
+  if (!toPreview.length) {
+    log("No recipients to preview.", "warning");
     return;
   }
   const subjectTemplate = document.getElementById("subjectInput").value.trim();
   if (!subjectTemplate) { log("Subject line is empty.", "error"); return; }
+
+  const bodyHtmlForPreview = await getComposeBodyAsync().catch(function() { return ""; });
+  if (!window._fillInValues && /\{\{fill_in:/i.test(bodyHtmlForPreview)) {
+    log("Note: {{fill_in:…}} tokens found — run a merge first to populate fill-in values. Previewing with placeholder tokens.", "warning");
+  }
 
   log("Reading email body for preview...", "info");
   try {
@@ -862,15 +1118,17 @@ async function handlePreviewAll() {
     });
   } catch (err) { log(`Body read error: ${err.message}`, "error"); return; }
 
+  previewRecipients = toPreview; // A10: store filtered set for navigation
   previewIndex = 0;
   renderPreviewEntry();
-  document.getElementById("previewModal").classList.remove("hidden");
+  _openModalWithTrap("previewModal"); // Feature 15: focus trap
 }
 
 function renderPreviewEntry() {
-  const total = parsedRecipients.length;
+  // A10: Use previewRecipients (filtered set) instead of parsedRecipients
+  const total = previewRecipients.length;
   if (!total || previewIndex >= total) return;
-  const recipient = Object.assign({}, parsedRecipients[previewIndex], {
+  const recipient = Object.assign({}, previewRecipients[previewIndex], {
     record_num:   String(previewIndex + 1),
     record_count: String(total)
   });
@@ -892,7 +1150,7 @@ function renderPreviewEntry() {
 }
 
 function closePreviewModal() {
-  document.getElementById("previewModal").classList.add("hidden");
+  _closeModalWithTrap("previewModal"); // Feature 15
 }
 
 /* ─── DOWNLOAD LOG ─────────────────────────────────────────────── */
@@ -917,19 +1175,22 @@ function downloadLog() {
 
 function downloadSendReport() {
   if (!sendOutcomes.length) { log("No send outcomes to report.", "info"); return; }
-  const header = "email,status,timestamp,error";
-  const rows = sendOutcomes.map(o => [
-    `"${o.email.replace(/"/g, '""')}"`,
-    o.status,
-    o.timestamp,
-    `"${(o.error || "").replace(/"/g, '""')}"`
-  ].join(","));
-  const csv  = [header, ...rows].join("\n");
+  const rows = [["row_num","email","display_name","subject_used","status","timestamp","error"]];
+  sendOutcomes.forEach(o => rows.push([
+    o.rowNum      || "",
+    o.email       || "",
+    o.displayName || "",
+    o.subjectUsed || "",
+    o.status      || "",
+    o.timestamp   || "",
+    o.error       || ""
+  ].map(v => csvField(String(v)))));
+  const csv  = rows.map(r => r.join(",")).join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement("a");
   a.href     = url;
-  a.download = `mail-merge-report-${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.csv`;
+  a.download = `mail-merge-report-${new Date().toISOString().slice(0, 10)}.csv`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -942,13 +1203,33 @@ function downloadSendReport() {
 function setProgress(current, total) {
   const pct = total > 0 ? Math.round((current / total) * 100) : 0;
   document.getElementById("progressContainer").classList.remove("hidden");
-  document.getElementById("progressFill").style.width = `${pct}%`;
+  const fill = document.getElementById("progressFill");
+  fill.style.width = `${pct}%`;
+  fill.setAttribute("aria-valuenow", pct);
   document.getElementById("progressLabel").textContent = `${pct}%  (${current} / ${total})`;
 }
 
 function hideProgress() {
   document.getElementById("progressContainer").classList.add("hidden");
   document.getElementById("progressFill").style.width = "0%";
+}
+
+/* Feature 5: show completion state and auto-hide after 8 seconds */
+function showMergeComplete(sent, total) {
+  _mergeCompletedSuccessfully = true;
+  const fill  = document.getElementById("progressFill");
+  const label = document.getElementById("progressLabel");
+  const container = document.getElementById("progressContainer");
+  if (container) container.classList.remove("hidden");
+  if (fill)  fill.style.width = "100%";
+  if (label) label.textContent = "✓ Done — " + sent + " of " + total + " sent";
+  setTimeout(function() {
+    if (!mergeInProgress) {  // only hide if no merge is running
+      const c = document.getElementById("progressContainer");
+      if (c) c.classList.add("hidden");
+      _mergeCompletedSuccessfully = false;
+    }
+  }, 8000);
 }
 
 /* ─── SUPPRESSION LIST ─────────────────────────────────────────── */
@@ -984,12 +1265,21 @@ function clearSuppression() {
 
 async function handleRetryFailed() {
   if (!failedRecipients.length) return;
-  const saved = parsedRecipients.slice();
+  // A7 + BUG 7: Save both recipients and CSV text — restore is now in a finally block
+  const savedRecipients = parsedRecipients.slice();
+  const savedCsvText = document.getElementById("csvInput").value;
   parsedRecipients = failedRecipients.slice();
   failedRecipients = [];
-  await handleMergeClick();
-  // Always restore original list — merge manages its own state
-  parsedRecipients = saved;
+  try {
+    await handleMergeClick();
+  } finally {
+    // Restore regardless of outcome (error or success)
+    parsedRecipients = savedRecipients;
+    if (!document.getElementById("csvInput").value && savedCsvText) {
+      document.getElementById("csvInput").value = savedCsvText;
+      lsSet(LS_KEY_CSV, savedCsvText);
+    }
+  }
 }
 
 /* ─── TAG INSERTION ────────────────────────────────────────────── */
@@ -1006,9 +1296,11 @@ function insertTag(tag) {
     input.focus();
     log(`Inserted tag into subject: ${tag}`, "success");
   } else {
+    const isMac = Office.context.platform === Office.PlatformType.Mac;
+    const coercionType = isMac ? Office.CoercionType.Text : Office.CoercionType.Html;
     Office.context.mailbox.item.body.setSelectedDataAsync(
       tag,
-      { coercionType: Office.CoercionType.Html },
+      { coercionType },
       (result) => {
         if (result.status !== Office.AsyncResultStatus.Succeeded) {
           log(`Failed to insert tag: ${tag}`, "error");
@@ -1031,16 +1323,26 @@ function addCustomTag() {
   input.value = "";
 }
 
-function addTagToBar(tag) {
+function addTagToBar(tag, type) {
   const existing = document.querySelector(`#tagBar [data-tag="${CSS.escape(tag)}"]`);
   if (existing) return;
   const bar    = document.getElementById("tagBar");
-  const newTag = document.createElement("span");
-  newTag.className   = "tag tag-custom";
-  newTag.dataset.tag = tag;
-  newTag.textContent = tag;
-  bar.appendChild(newTag);
-  saveCustomTagsToStorage();
+  const chip   = document.createElement("span");
+  chip.className   = type === "smart" ? "tag tag-smart" : "tag tag-custom";
+  chip.dataset.tag = tag;
+  chip.textContent = tag;
+  // Feature 14: keyboard accessibility
+  chip.setAttribute("tabindex", "0");
+  chip.setAttribute("role", "button");
+  chip.setAttribute("aria-label", "Insert " + tag);
+  chip.addEventListener("keydown", function(e) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      chip.click();
+    }
+  });
+  bar.appendChild(chip);
+  if (type !== "smart") saveCustomTagsToStorage();
 }
 
 /* ─── FILE UPLOAD: CSV + EXCEL ─────────────────────────────────── */
@@ -1285,6 +1587,17 @@ function resolveAttachmentsForRecipient(recipient) {
 
 function parseCSV(raw) {
   // RFC 4180-compliant parser that handles quoted fields with embedded newlines
+
+  // Auto-detect delimiter from first non-empty line
+  let delimiter = ",";
+  const firstLine = raw.split(/\r?\n/).find(function(l) { return l.trim().length > 0; }) || "";
+  const tabCount   = (firstLine.match(/\t/g)  || []).length;
+  const semiCount  = (firstLine.match(/;/g)   || []).length;
+  const commaCount = (firstLine.match(/,/g)   || []).length;
+  if (tabCount > commaCount && tabCount > semiCount) delimiter = "\t";
+  else if (semiCount > commaCount) delimiter = ";";
+  // else keep ","
+
   const rawRows = [];
   let row = [];
   let field = "";
@@ -1313,7 +1626,7 @@ function parseCSV(raw) {
       if (ch === '"') {
         inQuotes = true;
         i++;
-      } else if (ch === ',') {
+      } else if (ch === delimiter) {
         row.push(field);
         field = "";
         i++;
@@ -1360,6 +1673,8 @@ function parseCSV(raw) {
     while (cols.length < headers.length) cols.push("");
     const rowObj = {};
     headers.forEach((h, idx) => { rowObj[h] = cols[idx] || ""; });
+    rowObj._csvRow = r + 1; // L8: +1 for header row, already 1-based from loop start r=1
+    rowObj._originalIndex = rows.length; // P4: stamp before push to avoid O(n) indexOf
     rows.push(rowObj);
   }
 
@@ -1373,10 +1688,9 @@ let filterConditionCount = 0;
 
 function populateFilterSortBar(headers) {
   const sortCol = document.getElementById("sortCol");
-  sortCol.innerHTML = '<option value="">Sort col…</option>';
-  headers.forEach(h => {
-    sortCol.innerHTML += `<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`;
-  });
+  // P2: build all options then assign once — avoids repeated innerHTML += reparse
+  sortCol.innerHTML = '<option value="">Sort col…</option>' +
+    headers.map(h => `<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`).join("");
   document.getElementById("filterSortBar").classList.remove("hidden");
   // Start with one blank condition row visible
   if (document.getElementById("filterConditions").children.length === 0) {
@@ -1414,7 +1728,8 @@ function addFilterCondition(colVal = "", opVal = "contains", valVal = "") {
     <button class="btn-icon filter-remove-btn" data-cond-id="${id}" title="Remove">&#10005;</button>
   `;
   div.querySelector(".filter-remove-btn").addEventListener("click", () => {
-    document.getElementById(`filter-cond-${id}`)?.remove();
+    const condRowEl = document.getElementById("filter-cond-" + id);
+    if (condRowEl) condRowEl.remove();
   });
   document.getElementById("filterConditions").appendChild(div);
 }
@@ -1429,7 +1744,7 @@ function getFilterConditions() {
 }
 
 function applyCondition(row, cond) {
-  const cellVal = String(row[cond.col] ?? "").trim();
+  const cellVal = String(row[cond.col] !== null && row[cond.col] !== undefined ? row[cond.col] : "").trim();
   const testVal = cond.val.trim();
   const numCell = parseFloat(cellVal);
   const numTest = parseFloat(testVal);
@@ -1465,8 +1780,8 @@ function getFilteredSortedRecipients() {
     }
     if (sortCol) {
       result.sort((a, b) => {
-        const av = String(a[sortCol] ?? "").toLowerCase();
-        const bv = String(b[sortCol] ?? "").toLowerCase();
+        const av = String(a[sortCol] !== null && a[sortCol] !== undefined ? a[sortCol] : "").toLowerCase();
+        const bv = String(b[sortCol] !== null && b[sortCol] !== undefined ? b[sortCol] : "").toLowerCase();
         const cmp = av < bv ? -1 : av > bv ? 1 : 0;
         return sortDir === "desc" ? -cmp : cmp;
       });
@@ -1535,8 +1850,30 @@ function parseAndPreview() {
   }
 
   parsedRecipients = mappedRows;
+  sendOutcomes = [];   // BUG 14: reset outcomes on new CSV load so they accumulate across retries
   activeFilter = null; // reset filter on fresh parse
+  previewTablePage = 0; // Feature 6: reset paging on new CSV load
+  // A9: Clear stale condition rows DOM and counter so old rows don't persist across CSV reloads
+  document.getElementById("filterConditions").innerHTML = "";
+  filterConditionCount = 0;
   selectedRowIndices = null; // reset row selection on fresh parse
+  // Bug 4: clear failed recipients list and hide retry button on new CSV load
+  failedRecipients = [];
+  const _parseRetryBtn = document.getElementById("retryFailedBtn");
+  if (_parseRetryBtn) { _parseRetryBtn.classList.add("hidden"); _parseRetryBtn.textContent = ""; }
+
+  // Feature 13: hide getting-started banner once CSV is loaded
+  const bannerEl = document.getElementById("gettingStartedBanner");
+  if (bannerEl) bannerEl.classList.add("hidden");
+
+  // Feature 1: rebuild test-row selector
+  const testRowSel = document.getElementById("testRowSelect");
+  if (testRowSel) {
+    testRowSel.innerHTML = mappedRows.map(function(r, i) {
+      const label = escapeHtml((r.email || r.first_name || "").slice(0, 28)); // S2: escape CSV data
+      return '<option value="' + i + '">Row ' + (i + 1) + ': ' + label + '</option>';
+    }).join("");
+  }
 
   // Show map fields button now that we have headers
   document.getElementById("mapFieldsBtn").style.display = "";
@@ -1558,6 +1895,10 @@ function parseAndPreview() {
     if (!DEFAULT_TAGS.includes(tag)) addTagToBar(tag);
   });
 
+  // Feature 4: always expose merge_table and unsubscribe_link as smart tags
+  addTagToBar("{{merge_table}}", "smart");
+  addTagToBar("{{unsubscribe_link}}", "smart");
+
   document.getElementById("recipientCount").textContent =
     `${mappedRows.length} recipient${mappedRows.length !== 1 ? "s" : ""} loaded`;
 
@@ -1576,40 +1917,71 @@ function renderPreviewTable(rows) {
     return;
   }
 
+  // Feature 6: paging
+  const totalPages = Math.ceil(rows.length / PREVIEW_PAGE_SIZE);
+  previewTablePage = Math.min(previewTablePage, Math.max(0, totalPages - 1));
+  const pageRows = rows.slice(previewTablePage * PREVIEW_PAGE_SIZE, (previewTablePage + 1) * PREVIEW_PAGE_SIZE);
+
   const headers = Object.keys(rows[0]);
-  const displayRows = rows.slice(0, 5);
-  let html = `<label class="label">Preview (first ${displayRows.length} of ${rows.length} rows)</label><table class="preview-table"><thead><tr>`;
-  html += `<th><input type="checkbox" id="selectAllRowsChk" checked title="Select/deselect all" /></th>`;
-  headers.forEach(h => { html += `<th>${escapeHtml(h)}</th>`; });
-  html += `</tr></thead><tbody>`;
-  displayRows.forEach(row => {
-    const originalIdx = parsedRecipients.indexOf(row);
+  let html = '<label class="label">Preview (rows ' + (previewTablePage * PREVIEW_PAGE_SIZE + 1) + '–' + Math.min((previewTablePage + 1) * PREVIEW_PAGE_SIZE, rows.length) + ' of ' + rows.length + ')</label>';
+  html += '<table class="preview-table"><thead><tr>';
+  html += '<th><input type="checkbox" id="selectAllRowsChk" checked title="Select/deselect all" /></th>';
+  headers.forEach(h => { html += '<th>' + escapeHtml(h) + '</th>'; });
+  html += '</tr></thead><tbody>';
+  pageRows.forEach(function(row) {
+    const originalIdx = row._originalIndex !== undefined ? row._originalIndex : parsedRecipients.indexOf(row); // P4
     const isChecked = (selectedRowIndices === null || selectedRowIndices.has(originalIdx)) ? "checked" : "";
-    html += `<tr>`;
-    html += `<td><input type="checkbox" class="row-select-chk" data-idx="${originalIdx}" ${isChecked} /></td>`;
-    headers.forEach(h => { html += `<td>${escapeHtml(row[h] || "")}</td>`; });
-    html += "</tr>";
+    html += '<tr>';
+    html += '<td><input type="checkbox" class="row-select-chk" data-idx="' + originalIdx + '" ' + isChecked + ' /></td>';
+    headers.forEach(h => { html += '<td>' + escapeHtml(row[h] || "") + '</td>'; });
+    html += '</tr>';
   });
-  html += "</tbody></table>";
+  html += '</tbody></table>';
+
+  // Paging controls
+  if (totalPages > 1) {
+    html += '<div class="preview-paging">' +
+      '<button id="prevPageBtn" class="btn-sm"' + (previewTablePage === 0 ? ' disabled' : '') + '>‹ Prev</button>' +
+      '<span>Page ' + (previewTablePage + 1) + ' of ' + totalPages + ' (' + rows.length + ' total)</span>' +
+      '<button id="nextPageBtn" class="btn-sm"' + (previewTablePage >= totalPages - 1 ? ' disabled' : '') + '>Next ›</button>' +
+      '</div>';
+  }
+
   container.innerHTML = html;
 
+  // Wire paging buttons
+  var prevBtn = document.getElementById("prevPageBtn");
+  var nextBtn = document.getElementById("nextPageBtn");
+  if (prevBtn) {
+    prevBtn.addEventListener("click", function() {
+      previewTablePage = Math.max(0, previewTablePage - 1);
+      renderPreviewTable(rows);
+    });
+  }
+  if (nextBtn) {
+    nextBtn.addEventListener("click", function() {
+      previewTablePage = Math.min(totalPages - 1, previewTablePage + 1);
+      renderPreviewTable(rows);
+    });
+  }
+
   // Wire up header checkbox
-  document.getElementById("selectAllRowsChk").addEventListener("change", (e) => {
+  document.getElementById("selectAllRowsChk").addEventListener("change", function(e) {
     if (e.target.checked) {
       // Select all — null means "all included"
       selectedRowIndices = null;
-      document.querySelectorAll(".row-select-chk").forEach(chk => { chk.checked = true; });
+      document.querySelectorAll(".row-select-chk").forEach(function(chk) { chk.checked = true; });
     } else {
       // Deselect all — empty Set means "none included"
       selectedRowIndices = new Set();
-      document.querySelectorAll(".row-select-chk").forEach(chk => { chk.checked = false; });
+      document.querySelectorAll(".row-select-chk").forEach(function(chk) { chk.checked = false; });
     }
     updateSelectionCount();
   });
 
   // Wire up row checkboxes
-  document.querySelectorAll(".row-select-chk").forEach(chk => {
-    chk.addEventListener("change", () => {
+  document.querySelectorAll(".row-select-chk").forEach(function(chk) {
+    chk.addEventListener("change", function() {
       const idx = parseInt(chk.dataset.idx, 10);
       if (chk.checked) {
         if (selectedRowIndices !== null) {
@@ -1623,14 +1995,14 @@ function renderPreviewTable(rows) {
       } else {
         if (selectedRowIndices === null) {
           // Was all-selected; build full Set and remove this one
-          selectedRowIndices = new Set(parsedRecipients.map((_, i) => i));
+          selectedRowIndices = new Set(parsedRecipients.map(function(_, i) { return i; }));
           selectedRowIndices.delete(idx);
         } else {
           selectedRowIndices.delete(idx);
         }
       }
       const allChks = document.querySelectorAll(".row-select-chk");
-      const allChecked = [...allChks].every(c => c.checked);
+      const allChecked = [...allChks].every(function(c) { return c.checked; });
       const selectAllChk = document.getElementById("selectAllRowsChk");
       if (selectAllChk) selectAllChk.checked = allChecked;
       updateSelectionCount();
@@ -1708,7 +2080,7 @@ function processConditionals(template, recipient) {
       const col     = opMatch[1].trim().toLowerCase();
       const op      = opMatch[2];
       const val     = opMatch[3].trim();
-      const cellVal = String(recipient[col] ?? "").trim();
+      const cellVal = String(recipient[col] !== null && recipient[col] !== undefined ? recipient[col] : "").trim();
       const numCell = parseFloat(cellVal);
       const numVal  = parseFloat(val);
       const bothNum = !isNaN(numCell) && !isNaN(numVal);
@@ -1720,7 +2092,7 @@ function processConditionals(template, recipient) {
       else if (op === "<=") result = bothNum ? numCell <= numVal : cellVal <= val;
       else result = false;
     } else {
-      result = !!String(recipient[condPart.toLowerCase()] ?? "").trim();
+      const _cv = recipient[condPart.toLowerCase()]; result = !!String(_cv !== null && _cv !== undefined ? _cv : "").trim();
     }
     return result ? trueText : falseText;
   });
@@ -1747,7 +2119,8 @@ function applyFilter(value, filter) {
     const d = new Date(value);
     return isNaN(d.getTime()) ? value : d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
   }
-  return value;
+  // Unknown filter name = treat as fallback value for empty fields
+  return value.trim() ? value : filter;
 }
 
 /**
@@ -1765,6 +2138,10 @@ function applyFilter(value, filter) {
  * Pipe filter support (Feature 3): {{field|upper}}, {{amount|currency}}, etc.
  */
 function personalize(template, recipient, escapeValues = true) {
+  // Apply fill-in values (Feature 6) before any other processing
+  if (window._fillInValues) {
+    template = applyFillInValues(template, window._fillInValues);
+  }
   template = processConditionals(template, recipient);
   const now = new Date();
 
@@ -1772,17 +2149,17 @@ function personalize(template, recipient, escapeValues = true) {
   const escapedRecipient = {};
   Object.keys(recipient).forEach(key => {
     escapedRecipient[key.toLowerCase()] = escapeValues
-      ? escapeHtml(String(recipient[key] ?? ""))
-      : String(recipient[key] ?? "");
+      ? escapeHtml(String(recipient[key] !== null && recipient[key] !== undefined ? recipient[key] : ""))
+      : String(recipient[key] !== null && recipient[key] !== undefined ? recipient[key] : "");
   });
 
   // Build greeting_line from already-escaped values — don't escape again
   const greetingRecipient = escapeValues ? escapedRecipient : recipient;
   const greetingLine = resolveGreetingLine({
-    salutation: greetingRecipient.salutation ?? recipient.salutation ?? "",
-    first_name: greetingRecipient.first_name ?? recipient.first_name ?? "",
-    last_name:  greetingRecipient.last_name  ?? recipient.last_name  ?? "",
-    gender:     greetingRecipient.gender     ?? recipient.gender     ?? ""
+    salutation: (greetingRecipient.salutation !== null && greetingRecipient.salutation !== undefined ? greetingRecipient.salutation : (recipient.salutation !== null && recipient.salutation !== undefined ? recipient.salutation : "")),
+    first_name: (greetingRecipient.first_name !== null && greetingRecipient.first_name !== undefined ? greetingRecipient.first_name : (recipient.first_name !== null && recipient.first_name !== undefined ? recipient.first_name : "")),
+    last_name:  (greetingRecipient.last_name  !== null && greetingRecipient.last_name  !== undefined ? greetingRecipient.last_name  : (recipient.last_name  !== null && recipient.last_name  !== undefined ? recipient.last_name  : "")),
+    gender:     (greetingRecipient.gender     !== null && greetingRecipient.gender     !== undefined ? greetingRecipient.gender     : (recipient.gender     !== null && recipient.gender     !== undefined ? recipient.gender     : ""))
   });
 
   const lookup = new Map(Object.entries(escapedRecipient));
@@ -1791,11 +2168,30 @@ function personalize(template, recipient, escapeValues = true) {
   lookup.set("now",   now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }));
 
   // Single pass: match {{key}} or {{key|filter}} and replace if the key is known; leave unknown tokens intact.
-  return template.replace(/\{\{([^}|]+)(?:\|([^}]*))?\}\}/gi, (match, key, filter) => {
+  TOKEN_REGEX.lastIndex = 0; // P3: reset global regex state before reuse
+  let result = template.replace(TOKEN_REGEX, (match, key, filter) => {
     const val = lookup.get(key.trim().toLowerCase());
     if (val === undefined) return match;
     return applyFilter(val, filter ? filter.trim() : null);
   });
+
+  // Replace {{merge_table}} with grouped rows table if applicable
+  if (recipient._groupedRows && recipient._groupedRows.length > 1) {
+    const headers = Object.keys(recipient._groupedRows[0]).filter(k => !k.startsWith("_"));
+    result = result.replace(/\{\{merge_table\}\}/gi, buildMergeTable(recipient._groupedRows, headers));
+  } else {
+    result = result.replace(/\{\{merge_table\}\}/gi, "");
+  }
+
+  // {{unsubscribe_link}} → mailto: opt-out link
+  if (result.indexOf("{{unsubscribe_link}}") !== -1 || /\{\{unsubscribe_link\}\}/i.test(result)) {
+    const recipEmail = encodeURIComponent(recipient.email || "");
+    const senderAddr = (Office.context.mailbox && Office.context.mailbox.userProfile && Office.context.mailbox.userProfile.emailAddress) || "";
+    const unsubLink = '<a href="mailto:' + escapeHtml(senderAddr) + '?subject=UNSUBSCRIBE%20' + recipEmail + '&body=Please%20remove%20me%20from%20your%20mailing%20list." style="color:#888;font-size:11px;">Unsubscribe</a>'; // S3
+    result = result.replace(/\{\{unsubscribe_link\}\}/gi, unsubLink);
+  }
+
+  return result;
 }
 
 function findUnresolvedTokens(text) {
@@ -1846,7 +2242,10 @@ function parseCustomHeaders(str) {
     .filter(line => line.includes(":"))
     .map(line => {
       const colonIdx = line.indexOf(":");
-      return { name: line.slice(0, colonIdx).trim(), value: line.slice(colonIdx + 1).trim() };
+      return {
+        name:  line.slice(0, colonIdx).trim().replace(/[\r\n]/g, ""),   // S6: strip CRLF injection
+        value: line.slice(colonIdx + 1).trim().replace(/[\r\n]/g, "")   // S6: strip CRLF injection
+      };
     })
     .filter(h => h.name && h.value);
 }
@@ -1860,21 +2259,21 @@ function validateRecipients(recipients) {
     const r = recipients[i];
 
     // skip_if column: skip row if value is truthy (non-empty, non-zero, non-false)
-    const skipVal = String(r.skip_if ?? "").trim().toLowerCase();
+    const skipVal = String(r.skip_if !== null && r.skip_if !== undefined ? r.skip_if : "").trim().toLowerCase();
     if (skipVal && skipVal !== "0" && skipVal !== "false" && skipVal !== "no") {
-      log(`Row ${i + 2} (${r.email || "?"}): skipped — skip_if = "${r.skip_if}"`, "info");
+      log(`Row ${r._csvRow || (i + 2)} (${r.email || "?"}): skipped — skip_if = "${r.skip_if}"`, "info");
       continue;
     }
 
     if (!r.email) {
-      log(`Row ${i + 2}: missing email address — row skipped.`, "warning");
+      log(`Row ${r._csvRow || (i + 2)}: missing email address — row skipped.`, "warning");
       continue;
     }
     const addresses = r.email.split(/[;,\s]+/).map(s => s.trim()).filter(Boolean);
     // Log a warning for each invalid address in a multi-address row
     addresses.forEach(addr => {
       if (!EMAIL_REGEX.test(addr)) {
-        log(`Row ${i + 2}: invalid address skipped — "${addr}"`, "warning");
+        log(`Row ${r._csvRow || (i + 2)}: invalid address skipped — "${addr}"`, "warning");
       }
     });
     const hasValid  = addresses.some(a => EMAIL_REGEX.test(a));
@@ -1889,9 +2288,10 @@ function validateRecipients(recipients) {
 function ssoErrorMessage(code) {
   switch (code) {
     case 13001:
-      return "You are not signed in to a Microsoft 365 account in Outlook. " +
-             "Please sign in (File → Office Account) and try again. " +
-             "Note: sign in with your M365 email address, not your JumpCloud credentials.";
+      return "Your session has expired or requires re-authorization. " +
+             "Please close and reopen the Mail Merge task pane, then sign in again when prompted. " +
+             "Your failed recipients will be preserved for retry. " +
+             "(Tip: sign in with your M365 email address, not your JumpCloud credentials.)";
     case 13002:
       return "Authentication was cancelled or access was denied. Please try again.";
     case 13003:
@@ -1904,8 +2304,9 @@ function ssoErrorMessage(code) {
     case 13006:
       return "An error occurred in Office. Please save your work, restart Outlook, and try again.";
     case 13007:
-      return "Office could not obtain an access token. " +
-             "Try signing out of Office and back in, then retry.";
+      return "Your session has expired or requires re-authorization. " +
+             "Please close and reopen the Mail Merge task pane, then sign in again when prompted. " +
+             "Your failed recipients will be preserved for retry.";
     case 13008:
       return "Your organisation's policies prevented the consent prompt from appearing. " +
              "An administrator must grant permissions for this add-in in Entra ID.";
@@ -1918,8 +2319,8 @@ function ssoErrorMessage(code) {
       return "A navigation error occurred in the sign-in flow. " +
              "Please try again. If the problem persists, update Edge.";
     case 13012:
-      return "Single sign-on is not supported in this version of Outlook. " +
-             "Please update Office to the latest version and try again.";
+      // B3: Add-in not supported in current Outlook host
+      return "This add-in is not supported in your version of Outlook. Please update Outlook or use Outlook on the web.";
     case 13013:
       return "Too many authentication requests. Please wait a moment and try again.";
     default:
@@ -1949,6 +2350,113 @@ function checkPayloadSize(bodyTemplate) {
     log(`⚠️ Email body is ~${(bytes / 1024 / 1024).toFixed(2)} MB — dangerously close to the 4 MB ` +
         `Graph API per-message limit. Compress or remove inline images before sending.`, "warning");
   }
+}
+
+/* ─── SENDING WINDOW (Feature 2) ──────────────────────────────── */
+
+function msUntilWindowOpens() {
+  const sendingWindowEl = document.getElementById("sendingWindowEnabled");
+  const enabled = sendingWindowEl && sendingWindowEl.checked;
+  if (!enabled) return 0;
+  const now = new Date();
+  const day = now.getDay(); // 0=Sun, 6=Sat
+  const startParts = (document.getElementById("windowStart").value || "09:00").split(":").map(Number);
+  const endParts = (document.getElementById("windowEnd").value || "17:00").split(":").map(Number);
+  const startMins = startParts[0] * 60 + startParts[1];
+  const endMins = endParts[0] * 60 + endParts[1];
+  // L5: guard against inverted window (end <= start) which causes an infinite loop
+  if (startMins >= endMins) {
+    log("⚠ Sending window: end time must be after start time. Window check skipped.", "warning");
+    return 0; // don't block sending
+  }
+  const nowMins = now.getHours() * 60 + now.getMinutes();
+
+  const isWeekday = day >= 1 && day <= 5;
+  const inWindow = isWeekday && nowMins >= startMins && nowMins < endMins;
+  if (inWindow) return 0;
+
+  // Calculate ms until next window open
+  let next = new Date(now);
+  next.setSeconds(0, 0);
+  // If today is a weekday and before window start, wait until today's start
+  if (isWeekday && nowMins < startMins) {
+    next.setHours(startParts[0], startParts[1], 0, 0);
+    return next - now;
+  }
+  // Otherwise: next Monday (or next weekday) at window start
+  let daysAhead = 1;
+  while (true) {
+    const nextDay = (day + daysAhead) % 7;
+    if (nextDay >= 1 && nextDay <= 5) break;
+    daysAhead++;
+  }
+  next.setDate(next.getDate() + daysAhead);
+  next.setHours(startParts[0], startParts[1], 0, 0);
+  return next - now;
+}
+
+/* ─── RATE LIMITING (Feature 3) ───────────────────────────────── */
+
+let emailsSentThisHour = 0;
+let emailsSentToday = 0;
+let hourWindowStart = Date.now();
+let dayWindowStart = new Date().setHours(0, 0, 0, 0);
+
+/* ─── RATE LIMIT STATE PERSISTENCE (Feature 8) ─────────────────── */
+
+function loadRateLimitState() {
+  const saved = lsGet("mm_rate_state", null);
+  if (saved) {
+    const now = Date.now();
+    if (saved.hourWindowStart && (now - saved.hourWindowStart) < 3600000) {
+      emailsSentThisHour = saved.emailsSentThisHour || 0;
+      hourWindowStart = saved.hourWindowStart;
+    }
+    const todayStart = new Date().setHours(0, 0, 0, 0);
+    if (saved.dayWindowStart && saved.dayWindowStart >= todayStart) {
+      emailsSentToday = saved.emailsSentToday || 0;
+      dayWindowStart = saved.dayWindowStart;
+    }
+  }
+}
+
+function saveRateLimitState() {
+  lsSet("mm_rate_state", JSON.stringify({ emailsSentThisHour, emailsSentToday, hourWindowStart, dayWindowStart }));
+}
+
+async function checkRateLimits() {
+  // Refresh hour window if needed
+  if (Date.now() - hourWindowStart >= 3600000) {
+    hourWindowStart = Date.now();
+    emailsSentThisHour = 0;
+  }
+  // Refresh day window if needed
+  if (Date.now() - dayWindowStart >= 86400000) {
+    dayWindowStart = new Date().setHours(0, 0, 0, 0);
+    emailsSentToday = 0;
+  }
+
+  const maxPerHourEl2 = document.getElementById("maxPerHour");
+  const dailyCapEl2   = document.getElementById("dailyCap");
+  const maxPerHour = parseInt(maxPerHourEl2 ? maxPerHourEl2.value : "0", 10);
+  const dailyCap   = parseInt(dailyCapEl2   ? dailyCapEl2.value   : "0", 10);
+
+  if (dailyCap > 0 && emailsSentToday >= dailyCap) {
+    log(`Daily cap of ${dailyCap} reached. Stopping merge.`, "warning");
+    return false;
+  }
+
+  if (maxPerHour > 0 && emailsSentThisHour >= maxPerHour) {
+    const msUntilReset = hourWindowStart + 3600000 - Date.now();
+    const waitMins = Math.ceil(msUntilReset / 60000);
+    log(`⏸ Hourly limit of ${maxPerHour} reached. Pausing ${waitMins} min until hour resets…`, "warning");
+    await new Promise(r => setTimeout(r, msUntilReset));
+    hourWindowStart = Date.now();
+    emailsSentThisHour = 0;
+    log("▶ Resuming sends (hour window reset).", "info");
+  }
+
+  return true;
 }
 
 /* ─── GRAPH BATCH SEND ─────────────────────────────────────────── */
@@ -2045,47 +2553,76 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function getJitterMs() {
+  const minEl = document.getElementById("jitterMinInput");
+  const maxEl = document.getElementById("jitterMaxInput");
+  const min = parseInt(minEl ? minEl.value : "0", 10);
+  const max = parseInt(maxEl ? maxEl.value : "0", 10);
+  if (!min && !max) return 0;
+  const lo = Math.min(min, max);
+  const hi = Math.max(min, max);
+  return (lo + Math.random() * (hi - lo)) * 1000;
+}
+
+// L1: non-recursive retry — eliminates unbounded recursion under persistent 429s
 async function sendBatchWithRetry(requests, token) {
+  let pending = requests.slice();
+  const results = [];
+
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const response = await fetch(GRAPH_BATCH_URL, {
+    if (!pending.length) break;
+
+    const res = await fetch(GRAPH_BATCH_URL, {
       method: "POST",
-      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ requests })
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requests: pending })
     });
 
-    if (response.status === 429) {
-      const retryAfter = parseInt(response.headers.get("Retry-After") || "10", 10);
-      if (attempt < MAX_RETRIES) {
-        log(`Rate limited (429). Retrying batch in ${retryAfter}s (attempt ${attempt}/${MAX_RETRIES})...`, "warning");
-        await delay(retryAfter * 1000);
-        continue;
+    if (!res.ok) {
+      if (res.status === 429) {
+        const retryAfter = parseInt(res.headers.get("Retry-After") || "10", 10);
+        if (attempt < MAX_RETRIES) {
+          log(`Rate limited (429). Retrying entire batch in ${retryAfter}s (attempt ${attempt}/${MAX_RETRIES})...`, "warning");
+          await delay(retryAfter * 1000);
+          continue; // retry all pending
+        }
+        // Final attempt still throttled — fail all pending
+        log(`Rate limited after ${MAX_RETRIES} attempts — marking ${pending.length} request(s) as failed.`, "error");
+        pending.forEach(req => results.push({ id: req.id, status: 429, body: { error: { message: "Rate limited" } } }));
+        break;
+      }
+      throw new Error(`Batch HTTP error: ${res.status} ${res.statusText}`);
+    }
+
+    const data = await res.json();
+    const throttled = [];
+
+    for (const resp of (data.responses || [])) {
+      if (resp.status === 429) {
+        const original = pending.find(r => r.id === resp.id);
+        if (original) throttled.push(original);
       } else {
-        throw new Error(`Rate limited after ${MAX_RETRIES} retries.`);
+        results.push(resp);
       }
     }
 
-    if (!response.ok) throw new Error(`Batch HTTP error: ${response.status} ${response.statusText}`);
-
-    const data      = await response.json();
-    const responses = data.responses || [];
-
-    const throttled = responses.filter(r => r.status === 429);
-    if (throttled.length > 0 && attempt < MAX_RETRIES) {
-      const retryAfterHeader = throttled
-        .map(r => parseInt((r.headers || {})["Retry-After"] || "10", 10))
-        .reduce((a, b) => Math.max(a, b), 10);
-      const throttledIds  = new Set(throttled.map(r => r.id));
-      const retryRequests = requests.filter(r => throttledIds.has(r.id));
-      log(`${throttled.length} request(s) throttled. Retrying in ${retryAfterHeader}s (attempt ${attempt}/${MAX_RETRIES})...`, "warning");
-      await delay(retryAfterHeader * 1000);
-      const okResponses = responses.filter(r => r.status !== 429);
-      const retryResult = await sendBatchWithRetry(retryRequests, token);
-      return { responses: [...okResponses, ...(retryResult.responses || [])] };
+    if (throttled.length && attempt < MAX_RETRIES) {
+      const retryAfter = parseInt(
+        ((data.responses || []).find(r => r.status === 429)?.headers?.["Retry-After"]) || "10", 10
+      );
+      log(`${throttled.length} request(s) throttled. Retrying in ${retryAfter}s (attempt ${attempt}/${MAX_RETRIES})...`, "warning");
+      await delay(retryAfter * 1000);
+      pending = throttled; // narrow to only throttled items
+      continue;
+    } else if (throttled.length) {
+      // Exhausted retries — record as failed
+      log(`${throttled.length} request(s) still throttled after ${MAX_RETRIES} attempts — marking as failed.`, "error");
+      throttled.forEach(req => results.push({ id: req.id, status: 429, body: { error: { message: "Rate limited after retries" } } }));
     }
-
-    return data;
+    break; // all items resolved
   }
-  throw new Error("sendBatchWithRetry exhausted all attempts without resolving.");
+
+  return { responses: results };
 }
 
 /* ─── SCHEDULED SEND ───────────────────────────────────────────── */
@@ -2096,7 +2633,9 @@ async function sendScheduledMessages(
   importance, isReadReceiptRequested, isDeliveryReceiptRequested,
   customHeaders, plainText,
   sensitivity, categories,
-  bccSelf, selfEmail, flagged, expiryISO, listUnsubscribeTemplate, inlineImagesArr
+  bccSelf, selfEmail, flagged, expiryISO, listUnsubscribeTemplate, inlineImagesArr,
+  globalOffset = 0,       // A6: offset into the full valid array so record_num is correct in mixed runs
+  totalRecipientCount = 0 // L4: total valid count for correct record_count in mixed runs
 ) {
   if (!saveToSent) {
     log("⚠ Scheduled send: 'Save to Sent' cannot be suppressed for scheduled messages — Exchange always saves deferred sends. Continuing.", "warning");
@@ -2106,7 +2645,7 @@ async function sendScheduledMessages(
 
   let totalSent   = 0;
   let totalFailed = 0;
-  const totalCount = recipients.length;
+  const totalCount = totalRecipientCount || recipients.length; // L4
 
   for (let i = 0; i < recipients.length; i++) {
     if (cancelRequested) {
@@ -2115,7 +2654,7 @@ async function sendScheduledMessages(
     }
 
     const recipient = Object.assign({}, recipients[i], {
-      record_num:   String(i + 1),
+      record_num:   String(globalOffset + i + 1),  // A6: use global offset for correct record_num in mixed runs
       record_count: String(totalCount)
     });
     const personalizedSubject = personalize(subjectTemplate, recipient, false);  // subject = plain text
@@ -2141,7 +2680,7 @@ async function sendScheduledMessages(
       log(`Auth error at message ${i + 1}: ${err.message}`, "error");
       for (let j = i; j < recipients.length; j++) {
         failedRecipients.push(recipients[j]);
-        sendOutcomes.push({ email: recipients[j].email, status: "failed", timestamp, error: err.message });
+        sendOutcomes.push({ rowNum: recipients[j]._csvRow || (globalOffset + j + 1), email: recipients[j].email, displayName: recipients[j].display_name || recipients[j].first_name || "", subjectUsed: "", status: "failed", timestamp, error: err.message });
       }
       totalFailed += recipients.length - i;
       break;
@@ -2237,7 +2776,7 @@ async function sendScheduledMessages(
       }
 
       totalSent++;
-      sendOutcomes.push({ email: recipient.email, status: "scheduled", timestamp });
+      sendOutcomes.push({ rowNum: recipient._csvRow || (globalOffset + i + 1), email: recipient.email, displayName: (recipient.display_name || recipient.first_name || ""), subjectUsed: personalizedSubject.slice(0, 100), status: "scheduled", timestamp, error: "" });
 
       if (totalSent % 10 === 0 || i === recipients.length - 1) {
         log(`Scheduled ${totalSent}/${recipients.length}...`, "info");
@@ -2245,12 +2784,12 @@ async function sendScheduledMessages(
     } catch (err) {
       totalFailed++;
       failedRecipients.push(recipient);
-      sendOutcomes.push({ email: recipient.email, status: "failed", timestamp, error: err.message });
+      sendOutcomes.push({ rowNum: recipient._csvRow || (globalOffset + i + 1), email: recipient.email, displayName: (recipient.display_name || recipient.first_name || ""), subjectUsed: personalizedSubject.slice(0, 100), status: "failed", timestamp, error: err.message });
       log(`Failed for ${recipient.email}: ${err.message}`, "error");
       if (err.message.includes("403")) {
         for (let j = i + 1; j < recipients.length; j++) {
           failedRecipients.push(recipients[j]);
-          sendOutcomes.push({ email: recipients[j].email, status: "failed", timestamp, error: "aborted after 403" });
+          sendOutcomes.push({ rowNum: recipients[j]._csvRow || (globalOffset + j + 1), email: recipients[j].email, displayName: (recipients[j].display_name || recipients[j].first_name || ""), subjectUsed: "", status: "failed", timestamp, error: "aborted after 403" });
         }
         totalFailed += recipients.length - i - 1;
         break;
@@ -2294,12 +2833,14 @@ async function sendImmediateBatch(
   const indexOffset = allValid ? allValid.indexOf(recipients[0]) : 0;
   const totalCount = allValid ? allValid.length : recipients.length;
 
+  const _batchSubjects = []; // parallel array for UX 6 report columns
   const requests = recipients.map((recipient, idx) => {
     const recipientWithMeta = Object.assign({}, recipient, {
       record_num:   String(indexOffset + idx + 1),
       record_count: String(totalCount)
     });
     const personalizedSubject = personalize(subjectTemplate, recipientWithMeta, false);
+    _batchSubjects[idx] = personalizedSubject;
     const personalizedBody    = personalize(emailBodyTemplate, recipientWithMeta, true);
     const cc         = parseAddressList(recipient.cc  || "");
     const bcc        = parseAddressList(recipient.bcc || "");
@@ -2330,9 +2871,45 @@ async function sendImmediateBatch(
 
   log(`${recipients.length} ${action} split into ${totalBatches} batch${totalBatches > 1 ? "es" : ""} of up to ${batchSize}.`, "info");
 
+  let mergeStop = false;
   for (let i = 0; i < batches.length; i++) {
-    if (cancelRequested) {
+    if (cancelRequested || mergeStop) {
       log("Merge stopped by user.", "warning");
+      break;
+    }
+
+    // Feature 2: Sending window check (per batch)
+    const waitMs = msUntilWindowOpens();
+    if (waitMs > 0) {
+      const waitMins = Math.ceil(waitMs / 60000);
+      log(`⏸ Outside sending window. Pausing ${waitMins} min until window opens…`, "warning");
+      await new Promise(r => setTimeout(r, waitMs));
+      log("▶ Resuming sends.", "info");
+    }
+
+    // Feature 3: Rate limit check (per batch)
+    const canContinue = await checkRateLimits();
+    if (!canContinue) {
+      // L2: push all remaining unprocessed recipients (current batch onwards) to failedRecipients
+      const ts = new Date().toISOString();
+      for (let bi = i; bi < batches.length; bi++) {
+        for (const req of batches[bi]) {
+          const recipIdx = parseInt(req.id, 10) - 1;
+          if (recipients[recipIdx]) {
+            failedRecipients.push(recipients[recipIdx]);
+            sendOutcomes.push({
+              rowNum: recipients[recipIdx]._csvRow || (indexOffset + recipIdx + 1),
+              email: recipients[recipIdx].email || "",
+              displayName: recipients[recipIdx].display_name || recipients[recipIdx].first_name || "",
+              subjectUsed: (_batchSubjects[recipIdx] || "").slice(0, 100),
+              status: "failed",
+              timestamp: ts,
+              error: "Daily cap reached — not sent"
+            });
+          }
+        }
+      }
+      mergeStop = true;
       break;
     }
 
@@ -2349,7 +2926,7 @@ async function sendImmediateBatch(
         const idx = parseInt(req.id, 10) - 1;
         if (recipients[idx]) {
           failedRecipients.push(recipients[idx]);
-          sendOutcomes.push({ email: recipients[idx].email, status: "failed", timestamp: ts, error: err.message });
+          sendOutcomes.push({ rowNum: recipients[idx]._csvRow || (indexOffset + idx + 1), email: recipients[idx].email, displayName: recipients[idx].display_name || recipients[idx].first_name || "", subjectUsed: (_batchSubjects[idx] || "").slice(0, 100), status: "failed", timestamp: ts, error: err.message });
         }
       });
       totalFailed += batch.length;
@@ -2361,23 +2938,39 @@ async function sendImmediateBatch(
       const responses = result.responses || [];
       const ts = new Date().toISOString();
       const batchSentEmails = [];
+      let itemStatus401 = false;
       responses.forEach(r => {
         const recipIdx = parseInt(r.id, 10) - 1;
-        if (r.status >= 200 && r.status < 300) {
-          totalSent++;
+        if (r.status === 401) {
+          // Feature 9: auth token expired mid-batch
+          itemStatus401 = true;
+          totalFailed++;
           if (recipients[recipIdx]) {
-            sendOutcomes.push({ email: recipients[recipIdx].email, status: draftsMode ? "draft" : "sent", timestamp: ts });
+            failedRecipients.push(recipients[recipIdx]);
+            sendOutcomes.push({ rowNum: recipients[recipIdx]._csvRow || (indexOffset + recipIdx + 1), email: recipients[recipIdx].email, displayName: recipients[recipIdx].display_name || recipients[recipIdx].first_name || "", subjectUsed: (_batchSubjects[recipIdx] || "").slice(0, 100), status: "failed", timestamp: ts, error: "401 Unauthorized" });
+          }
+        } else if (r.status >= 200 && r.status < 300) {
+          totalSent++;
+          emailsSentThisHour++;
+          emailsSentToday++;
+          if (recipients[recipIdx]) {
+            sendOutcomes.push({ rowNum: recipients[recipIdx]._csvRow || (indexOffset + recipIdx + 1), email: recipients[recipIdx].email, displayName: recipients[recipIdx].display_name || recipients[recipIdx].first_name || "", subjectUsed: (_batchSubjects[recipIdx] || "").slice(0, 100), status: draftsMode ? "draft" : "sent", timestamp: ts, error: "" });
             if (!draftsMode) batchSentEmails.push(recipients[recipIdx].email);
           }
         } else {
           totalFailed++;
           if (recipients[recipIdx]) {
             failedRecipients.push(recipients[recipIdx]);
-            sendOutcomes.push({ email: recipients[recipIdx].email, status: "failed", timestamp: ts, error: JSON.stringify(r.body) });
+            sendOutcomes.push({ rowNum: recipients[recipIdx]._csvRow || (indexOffset + recipIdx + 1), email: recipients[recipIdx].email, displayName: recipients[recipIdx].display_name || recipients[recipIdx].first_name || "", subjectUsed: (_batchSubjects[recipIdx] || "").slice(0, 100), status: "failed", timestamp: ts, error: JSON.stringify(r.body) });
           }
           log(`Failed for request ID ${r.id}: ${r.status} — ${JSON.stringify(r.body)}`, "error");
         }
       });
+      saveRateLimitState(); // P5: call once per batch rather than once per email
+      if (itemStatus401) {
+        log("⚠ Auth token expired during send. Remaining recipients saved for retry. Reopen the task pane to re-authenticate.", "warning");
+        mergeStop = true;
+      }
       if (batchSentEmails.length > 0) recordSentEmails(batchSentEmails);
       setProgress(totalSent + totalFailed, recipients.length);
       log(`Batch ${i + 1}/${totalBatches} complete. ${draftsMode ? "Drafted" : "Sent"}: ${totalSent} | Failed: ${totalFailed}`, "success");
@@ -2388,21 +2981,141 @@ async function sendImmediateBatch(
         const failedIdx = parseInt(req.id, 10) - 1;
         if (recipients[failedIdx]) {
           failedRecipients.push(recipients[failedIdx]);
-          sendOutcomes.push({ email: recipients[failedIdx].email, status: "failed", timestamp: ts, error: err.message });
+          sendOutcomes.push({ rowNum: recipients[failedIdx]._csvRow || (indexOffset + failedIdx + 1), email: recipients[failedIdx].email, displayName: recipients[failedIdx].display_name || recipients[failedIdx].first_name || "", subjectUsed: (_batchSubjects[failedIdx] || "").slice(0, 100), status: "failed", timestamp: ts, error: err.message });
         }
       });
       totalFailed += batch.length;
       setProgress(totalSent + totalFailed, recipients.length);
     }
 
-    if (i < batches.length - 1 && !cancelRequested && batchDelayMs > 0) {
-      log(`Waiting ${batchDelayMs / 1000}s before next batch to avoid throttling...`, "info");
-      await delay(batchDelayMs);
+    if (i < batches.length - 1 && !cancelRequested) {
+      if (batchDelayMs > 0) {
+        log(`Waiting ${batchDelayMs / 1000}s before next batch to avoid throttling...`, "info");
+        await delay(batchDelayMs);
+      }
+      const jitter = getJitterMs();
+      if (jitter > 0) await delay(jitter);
     }
   }
 
   return { totalSent, totalFailed };
 }
+
+/* ─── PRE-SEND CONFIRMATION MODAL (Feature C) ─────────────────── */
+
+async function showPreSendConfirmation(recipients, batchDelayMs, scheduledCount) {
+  const count = recipients.length;
+  if (count <= 1) return true; // skip modal for single sends
+  scheduledCount = scheduledCount || 0;
+  const immediateCount = count - scheduledCount;
+  // BUG 9: account for both per-email delay and per-batch API round-trip time
+  const BATCH_SIZE_ESTIMATE = 20; // graph batch sends 20 at a time
+  const batchCount = Math.ceil(count / BATCH_SIZE_ESTIMATE);
+  const batchRoundTripMs = 2000; // ~2s per batch API call
+  const totalMs = (count * batchDelayMs) + (batchCount * batchRoundTripMs);
+  const estSeconds = totalMs / 1000;
+  const estStr = estSeconds < 10 ? "< 10s"
+    : estSeconds < 60 ? `~${Math.ceil(estSeconds)}s`
+    : estSeconds < 3600 ? `~${Math.ceil(estSeconds / 60)} min`
+    : `~${(estSeconds / 3600).toFixed(1)} hr`;
+  const first = recipients[0];
+  const firstName = (first.display_name || first.first_name || first.email || "").trim();
+
+  // Feature 12: show breakdown of immediate vs scheduled
+  let sendBreakdown = "";
+  if (scheduledCount > 0 && immediateCount > 0) {
+    sendBreakdown = '<br><span style="color:var(--text-muted,#605e5c);font-size:12px;">' + immediateCount + ' immediate &middot; ' + scheduledCount + ' scheduled (per send_at column)</span>';
+  } else if (scheduledCount > 0) {
+    sendBreakdown = '<br><span style="color:var(--text-muted,#605e5c);font-size:12px;">All ' + scheduledCount + ' scheduled per send_at column</span>';
+  }
+
+  document.getElementById("preSendSummary").innerHTML =
+    "<strong>" + count + "</strong> email" + (count !== 1 ? "s" : "") + " will be sent." + sendBreakdown + "<br>" +
+    "Estimated time: <strong>" + estStr + "</strong><br>" +
+    "First recipient: <strong>" + escapeHtml(firstName) + "</strong> &lt;" + escapeHtml(first.email || "") + "&gt;";
+  return new Promise(function(resolve) {
+    const prevFocus = document.activeElement;
+    const modal = document.getElementById("preSendModal");
+    modal.classList.remove("hidden");
+    const releaseTrap = trapFocus(modal);
+    document.getElementById("preSendConfirmBtn").onclick = function() {
+      releaseTrap();
+      if (prevFocus && typeof prevFocus.focus === "function") prevFocus.focus();
+      modal.classList.add("hidden");
+      resolve(true);
+    };
+    document.getElementById("preSendCancelBtn").onclick = function() {
+      releaseTrap();
+      if (prevFocus && typeof prevFocus.focus === "function") prevFocus.focus();
+      modal.classList.add("hidden");
+      resolve(false);
+    };
+  });
+}
+
+/* ─── MODAL FOCUS TRAP (Feature 15) ────────────────────────────── */
+
+function trapFocus(modal) {
+  const focusable = modal.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex="0"]'
+  );
+  if (!focusable.length) return function() {};
+  const first = focusable[0];
+  const last  = focusable[focusable.length - 1];
+  first.focus();
+
+  function handler(e) {
+    if (e.key !== "Tab") return;
+    if (e.shiftKey) {
+      if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+    } else {
+      if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  }
+  modal.addEventListener("keydown", handler);
+  return function() { modal.removeEventListener("keydown", handler); };
+}
+
+// Map of modalId → { prevFocus, releaseTrap }
+const _modalTrapState = new Map();
+
+function _openModalWithTrap(modalId) {
+  const modal = document.getElementById(modalId);
+  if (!modal) return;
+  const prevFocus = document.activeElement;
+  modal.classList.remove("hidden");
+  const releaseTrap = trapFocus(modal);
+  _modalTrapState.set(modalId, { prevFocus, releaseTrap });
+}
+
+function _closeModalWithTrap(modalId) {
+  const modal = document.getElementById(modalId);
+  if (modal) modal.classList.add("hidden");
+  const state = _modalTrapState.get(modalId);
+  if (state) {
+    state.releaseTrap();
+    if (state.prevFocus && typeof state.prevFocus.focus === "function") state.prevFocus.focus();
+    _modalTrapState.delete(modalId);
+  }
+}
+
+/* ─── SIMPLE CONFIRM MODAL HELPER ─────────────────────────────── */
+
+function showSimpleConfirm(message) {
+  document.getElementById("confirmText").textContent = message;
+  const sendBtn = document.getElementById("confirmSendBtn");
+  const savedText = sendBtn.textContent;
+  sendBtn.textContent = "Yes";
+  _openModalWithTrap("confirmModal");
+  return new Promise(function(resolve) {
+    _confirmModalPrevFocusSaved = true;
+    pendingMergeResolve = function(result) {
+      sendBtn.textContent = savedText;
+      resolve(result);
+    };
+  });
+}
+let _confirmModalPrevFocusSaved = false;
 
 /* ─── CONFIRMATION MODAL ───────────────────────────────────────── */
 
@@ -2439,22 +3152,22 @@ function showConfirmModal(rowCount, addressCount, scheduledTimeISO, broadcastMod
     text += " Continue?";
 
     document.getElementById("confirmText").textContent = text;
-    document.getElementById("confirmModal").classList.remove("hidden");
     document.getElementById("confirmSendBtn").textContent = broadcastMode ? "Broadcast" : action;
+    _openModalWithTrap("confirmModal"); // Feature 15: focus trap
   });
 }
 
 function confirmSend() {
   const resolve = pendingMergeResolve;
   pendingMergeResolve = null;
-  document.getElementById("confirmModal").classList.add("hidden");
+  _closeModalWithTrap("confirmModal"); // Feature 15: release trap + restore focus
   if (resolve) resolve(true);
 }
 
 function dismissModal() {
   const resolve = pendingMergeResolve;
   pendingMergeResolve = null;
-  document.getElementById("confirmModal").classList.add("hidden");
+  _closeModalWithTrap("confirmModal"); // Feature 15: release trap + restore focus
   if (resolve) resolve(false);
 }
 
@@ -2479,12 +3192,28 @@ function setMergeRunning(running) {
   mergeBtn.textContent = running ? "⏳ Sending..." : "▶ Run mail merge";
   stopBtn.disabled = !running;
   stopBtn.classList.toggle("hidden", !running);
-  if (!running) hideProgress();
+  if (running) {
+    // Feature 5: reset completion flag and progress bar at the start of a new merge
+    _mergeCompletedSuccessfully = false;
+    const fill = document.getElementById("progressFill");
+    if (fill) fill.style.width = "0%";
+  } else if (!_mergeCompletedSuccessfully) {
+    // Feature 5: only hide progress if we did NOT just call showMergeComplete
+    hideProgress();
+  }
 }
 
 /* ─── MAIN MERGE RUNNER ────────────────────────────────────────── */
 
 async function handleMergeClick() {
+  // BUG 1: double-send guard — prevents concurrent merges from multiple clicks during async modals
+  if (mergeInProgress) {
+    log("A merge is already in progress. Please wait or stop the current merge.", "warning");
+    return;
+  }
+  mergeInProgress = true;
+  document.getElementById("mergeBtn").disabled = true;
+  try {
   // 1. Ensure recipients are parsed
   if (parsedRecipients.length === 0) {
     parseAndPreview();
@@ -2603,6 +3332,32 @@ async function handleMergeClick() {
     }
   }
 
+  // 6b. Group rows by email if requested (many-to-one merge)
+  const groupByEmailEl = document.getElementById("groupByEmail");
+  if (groupByEmailEl && groupByEmailEl.checked) {
+    valid = groupRecipientsByEmail(valid);
+    log(`Grouped by email: ${valid.length} unique recipient(s).`, "info");
+  }
+
+  // 6c. Apply persistent opt-out list
+  const optOutSet = getOptOutList();
+  if (optOutSet.size > 0) {
+    const beforeOptOut = valid.length;
+    valid = valid.filter(r => {
+      const addrs = parseAddressList(r.email || "").map(a => a.emailAddress.address.toLowerCase());
+      return !addrs.some(a => optOutSet.has(a));
+    });
+    if (valid.length < beforeOptOut) {
+      log(`Skipped ${beforeOptOut - valid.length} opt-out recipient(s).`, "info");
+    }
+    if (valid.length === 0) {
+      log("All recipients are on the opt-out list. Nothing to send.", "error");
+      // BUG 13: do NOT call setMergeRunning(false) here — it was never set to true at this point.
+      // The mergeInProgress finally block (BUG 1) handles re-enabling the button.
+      return;
+    }
+  }
+
   // 7. Duplicate send guard check
   const recentDupes = checkDuplicateSendHistory(valid);
   if (recentDupes.length) {
@@ -2634,8 +3389,34 @@ async function handleMergeClick() {
     return;
   }
 
+  // 9b. Check for fill-in tokens and prompt user
+  const combinedTemplate = subjectTemplate + " " + emailBodyTemplate;
+  if (/\{\{fill_in:/i.test(combinedTemplate)) {
+    const fillInValues = await collectFillInValues(combinedTemplate);
+    if (fillInValues === null) {
+      log("Merge cancelled (fill-in prompt dismissed).", "warning");
+      return;
+    }
+    emailBodyTemplate = applyFillInValues(emailBodyTemplate, fillInValues);
+    window._fillInValues = fillInValues;
+  } else {
+    window._fillInValues = null;
+  }
+
   // 10. Payload size pre-flight
   checkPayloadSize(emailBodyTemplate);
+
+  // 10b. DNS pre-flight check for large sends (Feature 7)
+  await runDnsPreflightCheck(valid.length);
+
+  // 10c. Pre-send summary confirmation (Feature C) — only for sends > 1 recipient
+  const batchDelayForConfirm = parseFloat(document.getElementById("batchDelayInput").value) * 1000;
+  const scheduledCount = valid.filter(r => r.send_at && r.send_at.trim()).length; // Feature 12
+  const preSendOk = await showPreSendConfirmation(valid, batchDelayForConfirm, scheduledCount);
+  if (!preSendOk) {
+    log("Merge cancelled.", "info");
+    return;
+  }
 
   // 11. Check for unresolved tokens using first recipient as sample
   const sampleSubject = personalize(subjectTemplate, valid[0], false);
@@ -2649,12 +3430,15 @@ async function handleMergeClick() {
   }
 
   failedRecipients = [];
-  sendOutcomes     = [];
+  // BUG 14: sendOutcomes is NOT reset here — it accumulates across retry runs for the same CSV.
+  // It is reset in parseAndPreview() when a new CSV is loaded.
   warnedMissingAttachments.clear();
   document.getElementById("retryFailedBtn").classList.add("hidden");
   document.getElementById("downloadReportBtn").classList.add("hidden");
   cancelRequested = false;   // reset BEFORE enabling Stop
+  // BUG 3: wrap send block so setMergeRunning(false) is called even on unexpected throws
   setMergeRunning(true);
+  try {
   if (draftsMode) {
     log("Starting mail merge in DRAFTS mode — emails will be saved to Drafts folder, not sent.", "info");
   } else {
@@ -2701,13 +3485,16 @@ async function handleMergeClick() {
       : valid.filter(r => !(r.send_at && r.send_at.trim()));
 
     if (scheduledRecipients.length > 0) {
+      // A6: compute offset of first scheduled recipient within the full valid array
+      const firstScheduledIdx = valid.indexOf(scheduledRecipients[0]);
       ({ totalSent, totalFailed } = await sendScheduledMessages(
         scheduledRecipients, subjectTemplate, emailBodyTemplate, saveToSent,
         replyTo, sendAs, scheduledTimeISO,
         importance, isReadReceiptRequested, isDeliveryReceiptRequested,
         globalCustomHeaders, plainTextMode,
         sensitivity, categories,
-        bccSelf, selfEmail, flagged, expiryISO, listUnsubscribeTemplate, inlineImagesArr
+        bccSelf, selfEmail, flagged, expiryISO, listUnsubscribeTemplate, inlineImagesArr,
+        firstScheduledIdx, valid.length  // L4: pass total valid count for correct record_count
       ));
     }
 
@@ -2756,6 +3543,17 @@ async function handleMergeClick() {
 
   log(`─── Merge complete. ✅ Sent: ${totalSent} | ❌ Failed: ${totalFailed} ───`,
       totalFailed > 0 ? "warning" : "success");
+  // Bug 2: only show "Done" banner if the merge completed without a stop request
+  if (!cancelRequested) {
+    showMergeComplete(totalSent, totalSent + totalFailed);
+  } else {
+    // Stopped early — just hide progress bar normally
+    const _stopContainer = document.getElementById("progressContainer");
+    if (_stopContainer) _stopContainer.classList.add("hidden");
+  }
+  if (/\{\{unsubscribe_link\}\}/i.test(emailBodyTemplate)) {
+    log("ℹ {{unsubscribe_link}} was used. Monitor your inbox for 'UNSUBSCRIBE' replies and use the Opt-Out List to record them.", "info");
+  }
 
   if (failedRecipients.length > 0) {
     const retryBtn = document.getElementById("retryFailedBtn");
@@ -2776,17 +3574,270 @@ async function handleMergeClick() {
     log("CSV cleared from local storage after successful send.", "info");
   }
 
-  setMergeRunning(false);
+    setMergeRunning(false); // normal-flow explicit call (BUG 3)
+  } catch (err) {
+    log(`Unexpected error during merge: ${err.message}`, "error");
+  } finally {
+    setMergeRunning(false); // BUG 3 safety net — no-op if already called above
+  }
+  } finally {
+    // BUG 1: always release the double-send guard and re-enable the button
+    mergeInProgress = false;
+    document.getElementById("mergeBtn").disabled = false;
+  }
 }
 
 /* ─── CSV FIELD ESCAPING HELPER ────────────────────────────────── */
 
 function csvField(val) {
-  const s = String(val ?? "");
+  const s = String(val !== null && val !== undefined ? val : "");
   if (s.includes(",") || s.includes('"') || s.includes("\n")) {
     return '"' + s.replace(/"/g, '""') + '"';
   }
   return s;
+}
+
+/* ─── GROUPED ROW MERGE (Feature 4) ───────────────────────────── */
+
+function groupRecipientsByEmail(recipients) {
+  const map = new Map();
+  for (const r of recipients) {
+    const key = (r.email || "").toLowerCase().trim();
+    if (!key) {
+      // BUG 12: log skipped rows with whitespace-only email instead of silently dropping
+      log(`Row skipped in group merge: empty email address (row data: ${JSON.stringify(r).slice(0, 80)}).`, "warning");
+      continue;
+    }
+    if (!map.has(key)) map.set(key, { primary: r, rows: [r] });
+    else map.get(key).rows.push(r);
+  }
+  return Array.from(map.values()).map(({ primary, rows }) => ({ ...primary, _groupedRows: rows }));
+}
+
+function buildMergeTable(rows, headers) {
+  const cols = headers.filter(h => !["email","cc","bcc","attachment","skip_if","send_at","reply_to","display_name"].includes(h.toLowerCase()));
+  let html = '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;width:100%"><thead><tr>';
+  for (const col of cols) html += `<th style="background:#f0f0f0;padding:4px 8px">${escapeHtml(col)}</th>`;
+  html += '</tr></thead><tbody>';
+  for (const row of rows) {
+    html += '<tr>';
+    for (const col of cols) html += `<td style="padding:4px 8px">${escapeHtml(row[col] || '')}</td>`;
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+/* ─── OPT-OUT / UNSUBSCRIBE LIST (Feature 5) ──────────────────── */
+
+const LS_KEY_OPTOUT = "mm_optout_list";
+
+function getOptOutList() {
+  return new Set((lsGet(LS_KEY_OPTOUT, []) || []).map(e => e.toLowerCase().trim()));
+}
+
+function saveOptOutList(set) {
+  lsSet(LS_KEY_OPTOUT, JSON.stringify(Array.from(set)));
+  renderOptOutList();
+}
+
+function renderOptOutList() {
+  // BUG 11: use data-optout-idx and event delegation instead of inline onclick to prevent XSS
+  const list = lsGet(LS_KEY_OPTOUT, []) || [];
+  const el = document.getElementById("optoutList");
+  const countEl = document.getElementById("optoutCount");
+  if (!el) return;
+  el.innerHTML = list.map((email, idx) =>
+    `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 4px;">
+      <span>${escapeHtml(email)}</span>
+      <button data-optout-idx="${idx}" style="font-size:10px;padding:1px 6px;cursor:pointer;border:1px solid var(--border);border-radius:3px;background:var(--bg-secondary)">&#10005;</button>
+    </div>`
+  ).join("") || '<div style="color:var(--text-muted);padding:4px;">No addresses</div>';
+
+  // Attach listeners after innerHTML set
+  el.querySelectorAll("[data-optout-idx]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = parseInt(btn.dataset.optoutIdx, 10);
+      const currentList = lsGet(LS_KEY_OPTOUT, []) || [];
+      currentList.splice(idx, 1);
+      lsSet(LS_KEY_OPTOUT, JSON.stringify(currentList));
+      renderOptOutList();
+    });
+  });
+
+  if (countEl) countEl.textContent = `${list.length} address${list.length === 1 ? "" : "es"}`;
+}
+
+function removeOptOut(email) {
+  const list = new Set((lsGet(LS_KEY_OPTOUT, []) || []).map(e => e.toLowerCase().trim()));
+  list.delete(email.toLowerCase().trim());
+  saveOptOutList(list);
+}
+
+function initOptOutUI() {
+  const optoutAddBtn = document.getElementById("optoutAddBtn");
+  if (optoutAddBtn) {
+    optoutAddBtn.addEventListener("click", function() {
+      const input = document.getElementById("optoutAddInput");
+      const email = (input.value || "").trim().toLowerCase();
+      if (!email || !EMAIL_REGEX.test(email)) { log("Enter a valid email to add to opt-out list.", "warning"); return; }
+      const list = getOptOutList();
+      list.add(email);
+      saveOptOutList(list);
+      input.value = "";
+      log(`Added ${email} to opt-out list.`, "info");
+    });
+  }
+
+  const optoutClearBtn = document.getElementById("optoutClearBtn");
+  if (optoutClearBtn) {
+    optoutClearBtn.addEventListener("click", async function() {
+      const confirmed = await showSimpleConfirm("Clear the entire opt-out list? This cannot be undone.");
+      if (!confirmed) return;
+      saveOptOutList(new Set());
+      log("Opt-out list cleared.", "info");
+    });
+  }
+
+  const optoutImportBtn = document.getElementById("optoutImportBtn");
+  if (optoutImportBtn) {
+    optoutImportBtn.addEventListener("click", function() {
+      if (!parsedRecipients.length) { log("Load a CSV first.", "warning"); return; }
+      const list = getOptOutList();
+      let added = 0;
+      for (const r of parsedRecipients) {
+        const addrs = parseAddressList(r.email || "").map(function(a) { return a.emailAddress.address.toLowerCase(); });
+        for (const a of addrs) {
+          if (!list.has(a)) { list.add(a); added++; }
+        }
+      }
+      saveOptOutList(list);
+      log(`Imported ${added} address${added === 1 ? "" : "es"} to opt-out list.`, "success");
+    });
+  }
+
+  renderOptOutList();
+}
+
+/* ─── FILL-IN PROMPT (Feature 6) ──────────────────────────────── */
+
+async function collectFillInValues(template) {
+  const regex = /\{\{fill_in:([^}]+)\}\}/gi;
+  const prompts = new Map();
+  let m;
+  while ((m = regex.exec(template)) !== null) {
+    prompts.set(m[1].trim(), "");
+  }
+  if (prompts.size === 0) return null;
+
+  const fieldsEl = document.getElementById("fillInFields");
+  fieldsEl.innerHTML = "";
+  prompts.forEach((_, prompt) => {
+    const id = "fillin_" + prompt.replace(/\W+/g, "_");
+    const div = document.createElement("div");
+    div.style.cssText = "margin-bottom:10px;";
+    div.innerHTML = `<label style="font-size:12px;font-weight:600;display:block;margin-bottom:3px;">${escapeHtml(prompt)}</label>
+      <input type="text" id="${id}" placeholder="Enter ${escapeHtml(prompt)}…" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px;">`;
+    fieldsEl.appendChild(div);
+  });
+
+  return new Promise((resolve) => {
+    _openModalWithTrap("fillInModal"); // Feature 15: focus trap
+
+    document.getElementById("fillInOkBtn").onclick = () => {
+      const values = new Map();
+      prompts.forEach((_, prompt) => {
+        const id = "fillin_" + prompt.replace(/\W+/g, "_");
+        const fillInEl = document.getElementById(id); values.set(prompt, fillInEl ? fillInEl.value : "");
+      });
+      _closeModalWithTrap("fillInModal"); // Feature 15
+      resolve(values);
+    };
+
+    document.getElementById("fillInCancelBtn").onclick = () => {
+      _closeModalWithTrap("fillInModal"); // Feature 15
+      resolve(null);
+    };
+  });
+}
+
+function applyFillInValues(template, fillInValues) {
+  if (!fillInValues) return template;
+  fillInValues.forEach((value, prompt) => {
+    // S4: neutralise token delimiters in user input to prevent secondary substitution
+    const safeValue = value.replace(/\{\{/g, "{ {").replace(/\}\}/g, "} }");
+    const escapedPrompt = prompt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // BUG 6: use function replacer to prevent JS interpreting $&, $', $1 etc. in value
+    template = template.replace(
+      new RegExp(`\\{\\{fill_in:${escapedPrompt}\\}\\}`, "gi"),
+      () => safeValue
+    );
+  });
+  return template;
+}
+
+/* ─── DNS PRE-FLIGHT CHECK (Feature 7) ────────────────────────── */
+
+async function checkDomainDns(domain) {
+  const results = { spf: false, dmarc: false, dkim: false };
+  try {
+    const spfResp = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(domain)}&type=TXT`, {
+      headers: { "Accept": "application/dns-json" }
+    });
+    if (spfResp.ok) {
+      const data = await spfResp.json();
+      results.spf = (data.Answer || []).some(r => (r.data || "").includes("v=spf1"));
+    }
+  } catch(e) { /* network error, skip */ }
+
+  try {
+    const dmarcResp = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent("_dmarc." + domain)}&type=TXT`, {
+      headers: { "Accept": "application/dns-json" }
+    });
+    if (dmarcResp.ok) {
+      const data = await dmarcResp.json();
+      results.dmarc = (data.Answer || []).some(r => (r.data || "").includes("v=DMARC1"));
+    }
+  } catch(e) { /* network error, skip */ }
+
+  // BUG 10: check both selector1 and selector2 — non-M365 domains may use selector2 only
+  async function checkDkimSelector(selectorDomain) {
+    try {
+      const res = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(selectorDomain)}&type=CNAME`, {
+        headers: { Accept: "application/dns-json" }
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      return (data.Answer || []).length > 0;
+    } catch { return false; }
+  }
+  const dkim1 = await checkDkimSelector("selector1._domainkey." + domain);
+  const dkim2 = await checkDkimSelector("selector2._domainkey." + domain);
+  results.dkim = dkim1 || dkim2;
+
+  return results;
+}
+
+async function runDnsPreflightCheck(recipientCount) {
+  if (recipientCount < 500) return;
+  const senderEmail = (Office.context.mailbox && Office.context.mailbox.userProfile && Office.context.mailbox.userProfile.emailAddress) || "";
+  const domain = senderEmail.split("@")[1];
+  if (!domain) return;
+
+  // S5: disclose the third-party DNS query so users are aware of the data flow
+  log(`ℹ DNS pre-flight: querying Cloudflare DNS (cloudflare-dns.com) for ${domain} SPF/DKIM/DMARC records.`, "info");
+  log(`Checking DNS records for ${domain}…`, "info");
+  const dns = await checkDomainDns(domain);
+  const missing = [];
+  if (!dns.spf)  missing.push("SPF");
+  if (!dns.dmarc) missing.push("DMARC");
+  if (!dns.dkim)  missing.push("DKIM (selector1/selector2)");
+
+  if (missing.length > 0) {
+    log(`DNS pre-flight warning for ${domain}: Missing ${missing.join(", ")} records. Large sends without these may be marked as spam or rejected. Contact your IT admin to configure email authentication.`, "warning");
+  } else {
+    log(`DNS check passed for ${domain}: SPF, DMARC, and DKIM are configured.`, "success");
+  }
 }
 
 /* ─── IMPORT FROM OUTLOOK CONTACTS (Feature 1) ─────────────────── */
@@ -2804,14 +3855,17 @@ async function handleImportContacts() {
 
   try {
     const token = await getAccessToken();
-    // Fetch up to 500 contacts
-    const res = await fetch(
-      "https://graph.microsoft.com/v1.0/me/contacts?$select=displayName,givenName,surname,emailAddresses&$top=500&$orderby=displayName",
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (!res.ok) throw new Error(`Graph ${res.status}`);
-    const data = await res.json();
-    contactsData = (data.value || []).filter(c => c.emailAddresses && c.emailAddresses.length > 0);
+    // BUG 8: paginate through all contacts instead of capping at 500
+    let url = "https://graph.microsoft.com/v1.0/me/contacts?$select=displayName,givenName,surname,emailAddresses&$top=500&$orderby=displayName";
+    let allContacts = [];
+    while (url) {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) throw new Error(`Graph ${res.status}`);
+      const data = await res.json();
+      allContacts = allContacts.concat((data.value || []).filter(c => c.emailAddresses && c.emailAddresses.length > 0));
+      url = data["@odata.nextLink"] || null;
+    }
+    contactsData = allContacts;
     renderContactsList(contactsData);
   } catch (err) {
     document.getElementById("contactsList").innerHTML =
@@ -2895,7 +3949,7 @@ function filterContacts(query) {
   const q = query.toLowerCase();
   renderContactsList(contactsData.filter(c => {
     const name  = (c.displayName || "").toLowerCase();
-    const email = (c.emailAddresses[0]?.address || "").toLowerCase();
+    const email = ((c.emailAddresses[0] && c.emailAddresses[0].address) || "").toLowerCase();
     return name.includes(q) || email.includes(q);
   }));
 }
@@ -2948,13 +4002,17 @@ async function importContactFolder(folderId, folderName) {
   log(`Loading contacts from folder "${folderName}"…`, "info");
   try {
     const token = await getAccessToken();
-    const res = await fetch(
-      `https://graph.microsoft.com/v1.0/me/contactFolders/${folderId}/contacts?$select=displayName,givenName,surname,emailAddresses&$top=500`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (!res.ok) throw new Error(`Graph ${res.status}`);
-    const data = await res.json();
-    const contacts = (data.value || []).filter(c => c.emailAddresses && c.emailAddresses.length > 0);
+    // BUG 8: paginate through all folder contacts instead of capping at 500
+    let url = `https://graph.microsoft.com/v1.0/me/contactFolders/${folderId}/contacts?$select=displayName,givenName,surname,emailAddresses&$top=500`;
+    let allContacts = [];
+    while (url) {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) throw new Error(`Graph ${res.status}`);
+      const data = await res.json();
+      allContacts = allContacts.concat((data.value || []).filter(c => c.emailAddresses && c.emailAddresses.length > 0));
+      url = data["@odata.nextLink"] || null;
+    }
+    const contacts = allContacts;
     if (!contacts.length) { log(`Folder "${folderName}" has no contacts with email addresses.`, "warning"); return; }
 
     const header = "email,first_name,last_name";
@@ -2998,9 +4056,11 @@ function recordSentEmails(emails) {
       history[entry.emailAddress.address.toLowerCase()] = now;
     });
   });
-  // Prune entries older than 30 days
-  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  Object.keys(history).forEach(k => { if (history[k] < cutoff) delete history[k]; });
+  // Prune entries older than 30 days (Feature 16: explicit numeric comparison avoids ISO string bugs)
+  const cutoffMs = Date.now() - (30 * 24 * 60 * 60 * 1000);
+  Object.keys(history).forEach(k => {
+    if (new Date(history[k]).getTime() < cutoffMs) delete history[k];
+  });
   lsSet(LS_KEY_SEND_HISTORY, JSON.stringify(history));
 }
 
@@ -3014,9 +4074,7 @@ function checkDuplicateSendHistory(recipients) {
 
 function showDuplicateWarningModal(dupes) {
   return new Promise(resolve => {
-    const modal = document.getElementById("dupeSendModal");
     const body  = document.getElementById("dupeSendBody");
-    const history = lsGet(LS_KEY_SEND_HISTORY, {});
     body.innerHTML = `
       <p>${dupes.length} recipient(s) in this list were sent to in the past 30 days:</p>
       <ul style="max-height:120px;overflow-y:auto;font-size:11px;margin:6px 0 6px 16px;">
@@ -3025,13 +4083,13 @@ function showDuplicateWarningModal(dupes) {
       </ul>
       <p>Send anyway?</p>
     `;
-    modal.classList.remove("hidden");
+    _openModalWithTrap("dupeSendModal"); // Feature 15: focus trap
     document.getElementById("dupeSendProceedBtn").onclick = () => {
-      modal.classList.add("hidden");
+      _closeModalWithTrap("dupeSendModal");
       resolve(true);
     };
     document.getElementById("dupeSendCancelBtn").onclick = () => {
-      modal.classList.add("hidden");
+      _closeModalWithTrap("dupeSendModal");
       resolve(false);
     };
   });
@@ -3040,25 +4098,53 @@ function showDuplicateWarningModal(dupes) {
 /* ─── BROADCAST MODE (Feature 1 v1.9) ──────────────────────────── */
 
 async function handleBroadcast() {
-  const rawValid = getFilteredSortedRecipients();
-  if (!rawValid.length) { log("No recipients loaded.", "warning"); return; }
+  if (broadcastInProgress) {
+    log("A broadcast is already in progress.", "warning");
+    return;
+  }
+  broadcastInProgress = true;
+  try {
+  const rawAll = getFilteredSortedRecipients();
+  if (!rawAll.length) { log("No recipients loaded.", "warning"); return; }
+
+  // L3: filter skip_if rows (same logic as validateRecipients)
+  const rawValid = rawAll.filter(r => {
+    const s = (r.skip_if || "").trim().toLowerCase();
+    return !s || s === "0" || s === "false" || s === "no";
+  });
+  if (rawValid.length < rawAll.length) {
+    log(`Broadcast: ${rawAll.length - rawValid.length} row(s) skipped via skip_if column.`, "info");
+  }
 
   const subject = document.getElementById("subjectInput").value.trim();
   if (!subject) { log("Enter a subject before broadcasting.", "warning"); return; }
 
-  // Apply suppression list
-  const suppressed = rawValid.filter(r => suppressionSet.has((r.email || "").toLowerCase()));
-  if (suppressed.length) {
-    log(`Broadcast: ${suppressed.length} suppressed address(es) excluded.`, "info");
+  // A3: Apply suppression list — use parseAddressList so multi-TO rows match individual suppressed addresses
+  const afterSuppression = rawValid.filter(r => {
+    const addrs = parseAddressList(r.email || "");
+    return !addrs.some(a => suppressionSet.has(a.emailAddress.address.toLowerCase()));
+  });
+  const suppressedCount = rawValid.length - afterSuppression.length;
+  if (suppressedCount > 0) {
+    log(`Broadcast: ${suppressedCount} suppressed address(es) excluded.`, "info");
   }
-  const afterSuppression = rawValid.filter(r => !suppressionSet.has((r.email || "").toLowerCase()));
+
+  // BUG 2: Apply persistent opt-out list
+  const optOutSet = getOptOutList();
+  const afterOptOut = afterSuppression.filter(r => {
+    const addrs = parseAddressList(r.email || "");
+    return !addrs.some(a => optOutSet.has(a.emailAddress.address.toLowerCase()));
+  });
+  if (afterOptOut.length < afterSuppression.length) {
+    log(`Broadcast: ${afterSuppression.length - afterOptOut.length} opt-out recipient(s) excluded.`, "info");
+  }
 
   // Validate emails
-  const validEmails = afterSuppression.filter(r => {
+  const validEmails = afterOptOut.filter(r => {
     const addrs = parseAddressList(r.email || "");
     return addrs.length > 0;
   });
-  const skipped = afterSuppression.length - validEmails.length;
+  const skipped = afterOptOut.length - validEmails.length;
   if (skipped > 0) log(`Broadcast: ${skipped} row(s) with invalid email skipped.`, "warning");
 
   if (!validEmails.length) { log("No valid recipients for broadcast.", "warning"); return; }
@@ -3067,7 +4153,7 @@ async function handleBroadcast() {
   const recentDupes = checkDuplicateSendHistory(validEmails);
   if (recentDupes.length) {
     const proceed = await showDuplicateWarningModal(recentDupes);
-    if (!proceed) { setMergeRunning(false); return; }
+    if (!proceed) return; // A2: just return — do NOT call setMergeRunning(false) here; it was never set to true
   }
 
   // Confirm
@@ -3078,43 +4164,101 @@ async function handleBroadcast() {
   setMergeRunning(true);
   try {
     const token = await getAccessToken();
-    const bodyHtml = await getComposeBodyAsync();
-    const saveToSent = document.getElementById("saveToSentItems").checked;
-    const replyTo   = document.getElementById("replyToInput").value.trim();
-    const importance = document.getElementById("importanceSelect").value;
+    let bodyHtml = await getComposeBodyAsync();
+    const saveToSent  = document.getElementById("saveToSentItems").checked;
+    const replyTo     = document.getElementById("replyToInput").value.trim();
+    const importance  = document.getElementById("importanceSelect").value;
+    // A4: Read all Options tab settings
+    const plainTextMode          = document.getElementById("plainTextMode").checked;
+    const sensitivity            = document.getElementById("sensitivitySelect").value;
+    const categoriesRaw          = document.getElementById("categoriesInput").value.trim();
+    const categories             = categoriesRaw ? categoriesRaw.split(",").map(c => c.trim()).filter(Boolean) : [];
+    const isReadReceiptRequested     = document.getElementById("requestReadReceipt").checked;
+    const isDeliveryReceiptRequested = document.getElementById("requestDeliveryReceipt").checked;
+    const customHeadersEnabled   = document.getElementById("customHeadersEnabled").checked;
+    const globalCustomHeaders    = customHeadersEnabled
+      ? parseCustomHeaders(document.getElementById("customHeadersInput").value)
+      : [];
+    const flagged     = document.getElementById("flagForFollowup").checked;
+    const expiryEnabled = document.getElementById("expiryEnabled").checked;
+    let expiryISO = null;
+    if (expiryEnabled) {
+      const expiryValue = document.getElementById("expiryDateTimeInput").value;
+      if (expiryValue) expiryISO = new Date(expiryValue).toISOString();
+    }
+    const sendAs      = document.getElementById("sendAsInput").value.trim();
+    const bccSelf     = document.getElementById("bccSelfEnabled").checked;
+    let selfEmail = "";
+    try { selfEmail = Office.context.mailbox.userProfile.emailAddress || ""; } catch(e) { /* ignore */ }
 
     const bccAddresses = validEmails.flatMap(r =>
       parseAddressList(r.email || "").map(entry => ({
         emailAddress: { address: entry.emailAddress.address, name: r.display_name || "" }
       }))
     );
+    // A4: BCC self
+    if (bccSelf && selfEmail) {
+      bccAddresses.push({ emailAddress: { address: selfEmail } });
+    }
 
-    // Get sender address for undisclosed-recipients pattern
-    let senderEmail = "";
-    try {
-      senderEmail = Office.context.mailbox.userProfile.emailAddress || "";
-    } catch(e) { /* ignore */ }
+    // Feature 2: BCC recipient cap warnings
+    if (bccAddresses.length > 999) {
+      log("✗ Broadcast cancelled: over 999 addresses exceeds the Graph API hard limit.", "error");
+      setMergeRunning(false);
+      return;
+    }
+    if (bccAddresses.length > 500) {
+      log(`⚠ Broadcast: ${bccAddresses.length} BCC recipients exceeds Exchange Online's 500-address limit. The broadcast will likely fail. Consider splitting into smaller groups.`, "warning");
+    }
 
+    // A4: plain text mode
+    const bodyContent     = plainTextMode ? stripHtmlToText(bodyHtml) : bodyHtml;
+    const bodyContentType = plainTextMode ? "Text" : "HTML";
+
+    // BUG 5: toRecipients cannot be empty — fall back to sendAs, then a safe placeholder
+    if (!selfEmail && !sendAs) {
+      log("Broadcast: sender email unavailable — using fallback undisclosed-recipients address in To field. Some servers may reject this.", "warning");
+    }
     const message = {
       subject,
-      body: { contentType: "HTML", content: bodyHtml },
-      toRecipients: senderEmail
-        ? [{ emailAddress: { address: senderEmail, name: "Undisclosed Recipients" } }]
-        : [],
+      body: { contentType: bodyContentType, content: bodyContent },
+      toRecipients: (selfEmail || sendAs)
+        ? [{ emailAddress: { address: selfEmail || sendAs, name: "Undisclosed Recipients" } }]
+        : [{ emailAddress: { address: "undisclosed-recipients@noreply.invalid", name: "Undisclosed Recipients" } }],
       bccRecipients: bccAddresses,
-      importance,
+      // A11: only set importance if not "normal"
+      ...(importance !== "normal" && { importance }),
     };
     if (replyTo) message.replyTo = [{ emailAddress: { address: replyTo } }];
+    // A4: optional fields
+    if (sensitivity && sensitivity !== "normal") message.sensitivity = sensitivity;
+    if (categories.length > 0) message.categories = categories;
+    if (isReadReceiptRequested) message.isReadReceiptRequested = true;
+    if (isDeliveryReceiptRequested) message.isDeliveryReceiptRequested = true;
+    if (globalCustomHeaders.length > 0) message.internetMessageHeaders = globalCustomHeaders;
+    if (flagged) message.flag = { flagStatus: "flagged" };
+    if (expiryISO) message.expiryDateTime = { dateTime: expiryISO, timeZone: "UTC" };
+    if (sendAs) message.from = { emailAddress: { address: sendAs } };
 
-    // Add shared attachments
-    if (sharedAttachments.length) {
-      message.attachments = sharedAttachments.map(a => ({
+    // A5 + Build attachments: shared attachments first, then inline images
+    const attachmentsList = sharedAttachments.map(a => ({
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      name: a.name,
+      contentType: a.contentType,
+      contentBytes: a.contentBytes,
+    }));
+    // A5: Append inline CID images
+    inlineImages.forEach((img) => {
+      attachmentsList.push({
         "@odata.type": "#microsoft.graph.fileAttachment",
-        name: a.name,
-        contentType: a.contentType,
-        contentBytes: a.contentBytes,
-      }));
-    }
+        name: img.name,
+        contentType: img.contentType,
+        contentBytes: img.contentBytes,
+        isInline: true,
+        contentId: img.name,
+      });
+    });
+    if (attachmentsList.length > 0) message.attachments = attachmentsList;
 
     const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
       method: "POST",
@@ -3128,14 +4272,110 @@ async function handleBroadcast() {
     if (res.ok) {
       log(`Broadcast sent to ${validEmails.length} recipients (BCC).`, "success");
       recordSentEmails(validEmails.map(r => r.email));
+      // L6: record broadcast send outcomes so the report includes broadcast recipients
+      const ts = new Date().toISOString();
+      bccAddresses.forEach(addr => {
+        sendOutcomes.push({
+          rowNum: "",
+          email: typeof addr === "string" ? addr : (addr.emailAddress && addr.emailAddress.address) || "",
+          displayName: (typeof addr === "object" && addr.emailAddress && addr.emailAddress.name) || "",
+          subjectUsed: subject.slice(0, 100),
+          status: "broadcast",
+          timestamp: ts,
+          error: ""
+        });
+      });
+      if (sendOutcomes.length > 0) document.getElementById("downloadReportBtn").classList.remove("hidden");
     } else {
       const err = await res.json().catch(() => ({}));
-      log(`Broadcast failed: ${err.error?.message || res.status}`, "error");
+      log(`Broadcast failed: ${(err.error && err.error.message) || res.status}`, "error");
     }
   } catch(e) {
     log(`Broadcast error: ${e.message}`, "error");
   } finally {
     setMergeRunning(false);
+  }
+  } finally {
+    broadcastInProgress = false;
+  }
+}
+
+/* ─── SCHEDULING / RATE LIMIT ACTIVE BADGES (UX 7) ─────────────── */
+
+function updateSchedulingBadge() {
+  const active = document.getElementById("scheduleEnabled")?.checked ||
+                 document.getElementById("sendingWindowEnabled")?.checked;
+  const badge = document.getElementById("schedulingActiveBadge");
+  if (badge) badge.classList.toggle("hidden", !active);
+}
+
+function updateRateLimitBadge() {
+  const mphVal = parseInt(document.getElementById("maxPerHour")?.value || "0", 10);
+  const dcVal  = parseInt(document.getElementById("dailyCap")?.value   || "0", 10);
+  const active = mphVal > 0 || dcVal > 0;
+  const badge  = document.getElementById("rateLimitActiveBadge");
+  if (badge) badge.classList.toggle("hidden", !active);
+}
+
+/* ─── SIMULATE / DRY-RUN MODE (Feature 10) ─────────────────────── */
+
+async function handleSimulate() {
+  if (!parsedRecipients.length) { log("Load a CSV first.", "warning"); return; }
+  const valid = getFilteredSortedRecipients();
+  if (!valid.length) { log("No recipients match current filter.", "warning"); return; }
+
+  const simBtn = document.getElementById("simulateBtn");
+  if (simBtn) simBtn.disabled = true;
+  try {
+    const subject = document.getElementById("subjectInput")?.value || "";
+    let bodyHtml = "";
+    try { bodyHtml = await getComposeBodyAsync(); } catch(e) { bodyHtml = ""; }
+
+    const rows = [["record_num", "email", "display_name", "subject_preview", "body_tokens_missing", "skip_if_result", "attachment_found"]];
+
+    for (let i = 0; i < valid.length; i++) {
+      if (i > 0 && i % 50 === 0) await new Promise(r => setTimeout(r, 0)); // P1: yield to UI thread
+      const r = valid[i];
+      const augmented = Object.assign({}, r, {
+        record_num:   String(i + 1),
+        record_count: String(valid.length)
+      });
+
+      const personalizedSubject = personalize(subject, augmented, false);
+      const personalizedBody    = personalize(bodyHtml,  augmented, true);
+
+      // Find unresolved tokens (still contain {{ }})
+      const unresolvedMatches = personalizedBody.match(/\{\{[^}]+\}\}/g) || [];
+      const unresolved = unresolvedMatches.join("; ") || "none";
+
+      // skip_if result — L7: logic now matches validateRecipients exactly
+      const skipVal = (r.skip_if || "").trim().toLowerCase();
+      const skipResult = (skipVal && skipVal !== "0" && skipVal !== "false" && skipVal !== "no") ? "SKIP" : "send";
+
+      rows.push([
+        String(i + 1),
+        r.email || "",
+        r.display_name || r.first_name || "",
+        personalizedSubject.slice(0, 80),
+        unresolved,
+        skipResult,
+        r.attachment ? "check manually" : "n/a"
+      ]);
+    }
+
+    const csv = rows.map(row => row.map(v => csvField(String(v))).join(",")).join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "merge-simulation-" + new Date().toISOString().slice(0, 10) + ".csv";
+    a.click();
+    URL.revokeObjectURL(url);
+    log("Simulation complete: " + valid.length + " rows. Check the downloaded CSV for token issues.", "success");
+  } catch(e) {
+    log("Simulation failed: " + e.message, "error");
+  } finally {
+    if (simBtn) simBtn.disabled = false;
   }
 }
 
@@ -3229,27 +4469,26 @@ function importDirectorySelected() {
 
 function populateInsertFieldSelect(headers) {
   const sel = document.getElementById("insertFieldSelect");
-  const smart = ["greeting_line", "today", "now", "record_num", "record_count"];
-  sel.innerHTML = '<option value="">— pick field —</option>';
-  // Smart tokens first
-  smart.forEach(t => {
-    sel.innerHTML += `<option value="{{${t}}}">✨ {{${t}}}</option>`;
-  });
-  // CSV columns
-  headers.forEach(h => {
-    sel.innerHTML += `<option value="{{${escapeHtml(h)}}}">{{${escapeHtml(h)}}}</option>`;
-  });
+  const smart = ["greeting_line", "today", "now", "record_num", "record_count", "merge_table", "fill_in:Your prompt", "unsubscribe_link"];
+  // P2: build all options then assign once — avoids repeated innerHTML += reparse
+  const smartOpts = smart.map(t => `<option value="{{${t}}}">✨ {{${t}}}</option>`).join("");
+  const colOpts   = headers.map(h => `<option value="{{${escapeHtml(h)}}}">{{${escapeHtml(h)}}}</option>`).join("");
+  sel.innerHTML = '<option value="">— pick field —</option>' + smartOpts + colOpts;
 }
 
 async function handleInsertField() {
   const sel = document.getElementById("insertFieldSelect");
   const token = sel.value;
   if (!token) { log("Pick a field to insert.", "warning"); return; }
+  // B1: On Mac, CoercionType.Html causes font-size bugs and fails after multiple calls.
+  // Tokens like {{first_name}} are plain text so Text coercion is safe.
+  const isMac = Office.context.platform === Office.PlatformType.Mac;
+  const coercionType = isMac ? Office.CoercionType.Text : Office.CoercionType.Html;
   try {
     await new Promise((resolve, reject) => {
       Office.context.mailbox.item.body.setSelectedDataAsync(
         token,
-        { coercionType: Office.CoercionType.Html },
+        { coercionType },
         (result) => {
           if (result.status === Office.AsyncResultStatus.Succeeded) resolve();
           else reject(new Error(result.error.message));
@@ -3272,7 +4511,7 @@ async function handleCheckErrors() {
 
   // Collect known tokens: CSV headers + smart tokens
   const csvHeaders = new Set(Object.keys(parsedRecipients[0]).map(k => k.toLowerCase()));
-  const smartTokens = new Set(["greeting_line", "today", "now", "record_num", "record_count"]);
+  const smartTokens = new Set(["greeting_line", "today", "now", "record_num", "record_count", "merge_table", "unsubscribe_link"]);
   const allKnown = new Set([...csvHeaders, ...smartTokens]);
 
   // Get subject
@@ -3293,9 +4532,10 @@ async function handleCheckErrors() {
   const usedTokens = new Set();
   let m;
   while ((m = tokenRegex.exec(combined)) !== null) {
-    // Skip {{if:...}} conditionals — handled separately
+    // Skip {{if:...}} conditionals — handled separately; skip built-in runtime tokens
     const key = m[1].trim().toLowerCase();
-    if (!key.startsWith("if:")) usedTokens.add(key);
+    if (key.startsWith("if:") || key.startsWith("fill_in:") || key === "merge_table") continue;
+    usedTokens.add(key);
   }
 
   // Also extract tokens used inside {{if:...}} conditions
@@ -3332,7 +4572,7 @@ async function handleCheckErrors() {
   if (unknownTokens.length) {
     lines.push(`<p style="color:#eb5757;margin-bottom:4px;"><strong>⚠ ${unknownTokens.length} unknown token(s)</strong> — not in CSV headers or smart tokens:</p>`);
     lines.push('<ul style="margin:0 0 8px 16px;">');
-    unknownTokens.forEach(t => lines.push(`<li><code>{{${t}}}</code> — will not be replaced</li>`));
+    unknownTokens.forEach(t => lines.push(`<li><code>{{${escapeHtml(t)}}}</code> — will not be replaced</li>`)); // S1
     lines.push('</ul>');
   } else if (usedTokens.size) {
     lines.push('<p style="color:#107c10;margin-bottom:8px;">✔ All tokens match CSV columns or smart tokens.</p>');
@@ -3341,7 +4581,7 @@ async function handleCheckErrors() {
   if (Object.keys(blanksByToken).length) {
     lines.push(`<p style="color:#f2994a;margin-bottom:4px;"><strong>⚠ Blank values found:</strong></p>`);
     Object.entries(blanksByToken).forEach(([token, rows]) => {
-      lines.push(`<p style="margin:4px 0 2px;"><code>{{${token}}}</code> is blank in ${rows.length} row(s):</p>`);
+      lines.push(`<p style="margin:4px 0 2px;"><code>{{${escapeHtml(token)}}}</code> is blank in ${rows.length} row(s):</p>`); // S1
       lines.push('<ul style="margin:0 0 6px 16px;color:#605e5c;">');
       rows.slice(0, 5).forEach(r => lines.push(`<li>Row ${r.idx}: ${escapeHtml(r.email)}</li>`));
       if (rows.length > 5) lines.push(`<li>… and ${rows.length - 5} more</li>`);
@@ -3359,5 +4599,5 @@ async function handleCheckErrors() {
     : `<p style="color:#107c10;font-weight:600;">✔ No errors found. Ready to send.</p>`);
 
   document.getElementById("checkErrorsBody").innerHTML = lines.join("");
-  document.getElementById("checkErrorsModal").classList.remove("hidden");
+  _openModalWithTrap("checkErrorsModal"); // Feature 15: focus trap
 }
