@@ -10,7 +10,7 @@
   <ProviderName>Promethean IT</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Mail Merge"/>
-  <Description DefaultValue="Personalized bulk email directly in New Outlook. Replaces classic Word-to-Outlook mail merge. Processes all data locally — zero data touches our servers."/>
+  <Description DefaultValue="Personalized bulk email directly in New Outlook. Replaces classic Word-to-Outlook mail merge. Processes all data locally - zero data touches our servers."/>
 
   <IconUrl DefaultValue="https://leighton-grey.github.io/mail-merge-addin/assets/icon-80.png"/>
   <HighResolutionIconUrl DefaultValue="https://leighton-grey.github.io/mail-merge-addin/assets/icon-80.png"/>
@@ -18,8 +18,6 @@
 
   <AppDomains>
     <AppDomain>https://leighton-grey.github.io</AppDomain>
-    <AppDomain>https://login.microsoftonline.com</AppDomain>
-    <AppDomain>https://graph.microsoft.com</AppDomain>
   </AppDomains>
 
   <Hosts>
