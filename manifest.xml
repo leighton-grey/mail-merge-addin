@@ -7,7 +7,7 @@
   xsi:type="MailApp">
 
   <Id>d06ae3cf-a7da-4264-b20e-ab8d70c06977</Id>
-  <Version>2.4.0</Version>
+  <Version>2.4.0.0</Version>
   <ProviderName>Promethean IT</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Mail Merge"/>
