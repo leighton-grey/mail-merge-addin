@@ -6,7 +6,7 @@
   xmlns:mailappor="http://schemas.microsoft.com/office/mailappversionoverrides/1.0"
   xsi:type="MailApp">
 
-  <Id>d06ae3cf-a7da-4264-b20e-ab8d70c06977</Id>
+  <Id>6917ba68-9d86-45d7-8ca5-354503f5983a</Id>
   <Version>2.4.0.0</Version>
   <ProviderName>Promethean IT</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
@@ -56,7 +56,6 @@
     <Hosts>
       <Host xsi:type="MailHost">
         <DesktopFormFactor>
-          <FunctionFile resid="Taskpane.Url"/>
           <ExtensionPoint xsi:type="MessageComposeCommandSurface">
             <OfficeTab id="TabDefault">
               <Group id="msgComposeGroup">
