@@ -5,7 +5,7 @@
   xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
   xsi:type="MailApp">
 
-  <Id>a3a648da-9dc0-48ce-948a-ba2434afcadd</Id>
+  <Id>d06ae3cf-a7da-4264-b20e-ab8d70c06977</Id>
   <Version>2.4.0</Version>
   <ProviderName>Promethean IT</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
@@ -112,8 +112,8 @@
     </Resources>
 
     <WebApplicationInfo>
-      <Id>a3a648da-9dc0-48ce-948a-ba2434afcadd</Id>
-      <Resource>api://leighton-grey.github.io/mail-merge-addin/a3a648da-9dc0-48ce-948a-ba2434afcadd</Resource>
+      <Id>d06ae3cf-a7da-4264-b20e-ab8d70c06977</Id>
+      <Resource>api://d06ae3cf-a7da-4264-b20e-ab8d70c06977</Resource>
       <Scopes>
         <Scope>openid</Scope>
         <Scope>profile</Scope>
