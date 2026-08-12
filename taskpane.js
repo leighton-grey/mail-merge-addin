@@ -178,13 +178,20 @@ Office.onReady((info) => {
       const banner = document.createElement("div");
       banner.style.cssText = "background:#eb5757;color:#fff;padding:10px 14px;font-size:12px;line-height:1.5;";
       banner.innerHTML = `<strong>&#9888; No Exchange Online mailbox detected.</strong><br>
-        This add-in sends email via Microsoft Graph and requires an Exchange Online mailbox.
-        Your Microsoft 365 account may not include Exchange Online, or you may be signed in
-        with a non-Exchange account. If your primary email is Gmail or another IMAP account,
-        this add-in only works when composing from a Microsoft 365 Exchange Online account.
-        Please contact your IT administrator.<br>
-        <a href="https://docs.microsoft.com/en-us/microsoft-365/admin/misc/why-cant-i-do-mail-merge"
-           style="color:#fff;text-decoration:underline;" target="_blank">Learn more</a>`;
+        This add-in sends email via Microsoft Graph and requires an Exchange Online mailbox.<br><br>
+        <strong>Common causes:</strong><br>
+        &bull; Your Microsoft 365 license includes Office apps but not Exchange Online
+        (e.g. M365 Apps for Business/Enterprise without an email plan).<br>
+        &bull; Outlook is configured with a Gmail or other IMAP account rather than
+        a Microsoft 365 Exchange Online account.<br>
+        &bull; If you use <strong>JumpCloud</strong> as your identity provider, your user account
+        may not be synced to the M365 Cloud Directory Integration — contact your IT administrator
+        to ensure your account is provisioned with an Exchange Online mailbox.<br><br>
+        <em>Note: having Google Workspace for email does not prevent this add-in from working —
+        you just need an M365 account with Exchange Online as well, and Outlook must be signed in
+        with that M365 account (not the Google account).</em><br><br>
+        <a href="https://learn.microsoft.com/en-us/microsoft-365/admin/misc/why-cant-i-do-mail-merge"
+           style="color:#fff;text-decoration:underline;" target="_blank">Learn more about Exchange Online requirements</a>`;
       document.body.insertBefore(banner, document.body.firstChild);
       ["mergeBtn","testSendBtn","previewAllBtn","saveDraftsBtn","broadcastBtn"].forEach(id => {
         const el = document.getElementById(id);
@@ -2295,12 +2302,20 @@ function ssoErrorMessage(code) {
     case 13002:
       return "Authentication was cancelled or access was denied. Please try again.";
     case 13003:
-      return "Personal Microsoft accounts (Outlook.com / Hotmail) are not supported. " +
-             "This add-in requires a Microsoft 365 work or school account.";
+      return "Personal Microsoft accounts (Outlook.com / Hotmail) are not supported — " +
+             "this add-in requires a Microsoft 365 work or school account with Exchange Online. " +
+             "If you are using a JumpCloud-managed account, ensure your user is provisioned " +
+             "and synced to Microsoft 365 in the JumpCloud Cloud Directory Integration.";
     case 13004:
+      return "Add-in configuration error — the Entra ID app registration may be misconfigured. " +
+             "Contact your IT administrator and reference SSO error 13004. " +
+             "If your organisation uses JumpCloud as its IdP, ensure federation with " +
+             "Microsoft 365/Entra ID is enabled and the add-in has been admin-consented.";
     case 13005:
-      return "Add-in configuration error — the Entra app registration may be misconfigured. " +
-             "Contact your IT administrator and reference SSO error " + code + ".";
+      return "Your account is not configured for this add-in. " +
+             "If you use JumpCloud SSO, ensure your user account is bound to the " +
+             "M365 Cloud Directory Integration in JumpCloud before signing in. " +
+             "Contact your IT administrator and reference SSO error 13005.";
     case 13006:
       return "An error occurred in Office. Please save your work, restart Outlook, and try again.";
     case 13007:
