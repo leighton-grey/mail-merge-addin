@@ -51,9 +51,7 @@
     const REDIRECT_URI = "https://leighton-grey.github.io/mail-merge-addin/auth-dialog.html";
     const SCOPES = [
       "https://graph.microsoft.com/Mail.Send",
-      "https://graph.microsoft.com/User.Read",
-      "https://graph.microsoft.com/Contacts.Read",
-      "https://graph.microsoft.com/People.Read"
+      "https://graph.microsoft.com/User.Read"
     ];
 
     Office.initialize = function() {};
@@ -70,7 +68,7 @@
       try {
         Office.context.ui.messageParent(JSON.stringify(data));
       } catch (e) {
-        showError("Could not relay token to add-in: " + e.message);
+        showError("Could not relay token: " + e.message);
       }
     }
 
@@ -83,12 +81,15 @@
       },
       cache: {
         cacheLocation: "sessionStorage",
-        storeAuthStateInCookie: true
+        storeAuthStateInCookie: false
       }
     });
 
     async function run() {
       try {
+        // Required in MSAL browser v2.37+ — must await before any other calls
+        await msalInstance.initialize();
+
         // 1. Handle redirect coming back from Microsoft login
         const redirectResponse = await msalInstance.handleRedirectPromise();
         if (redirectResponse && redirectResponse.accessToken) {
@@ -117,10 +118,16 @@
 
       } catch (e) {
         if (e instanceof msal.BrowserAuthError && e.errorCode === "interaction_in_progress") {
-          // Redirect already in flight — do nothing, page will reload
+          // Stale MSAL state — clear and tell the user to retry
+          sessionStorage.clear();
+          const msg = "A previous sign-in was interrupted. Close this dialog and click Sign In again.";
+          showError(msg);
+          setTimeout(() => sendToParent({ type: "error", message: msg }), 3000);
           return;
         }
-        sendToParent({ type: "error", message: e.message || "Authentication failed" });
+        const msg = e.errorMessage || e.message || "Authentication failed";
+        showError(msg);
+        setTimeout(() => sendToParent({ type: "error", message: msg }), 3000);
       }
     }
 
