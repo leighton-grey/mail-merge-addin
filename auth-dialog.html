@@ -6,13 +6,15 @@
   <title>Mail Merge – Sign In</title>
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'self';
-             script-src 'self' https://appsforoffice.microsoft.com https://alcdn.msauth.net 'unsafe-inline';
+             script-src 'self' https://appsforoffice.microsoft.com https://alcdn.msauth.net https://cdn.jsdelivr.net 'unsafe-inline';
              connect-src 'self' https://login.microsoftonline.com https://login.microsoft.com https://graph.microsoft.com https://sts.windows.net https://appsforoffice.microsoft.com;
              style-src 'self' 'unsafe-inline';
              img-src 'self' data: https://login.microsoftonline.com;
              frame-src 'self' https://login.microsoftonline.com https://login.microsoft.com;" />
+
+  <!-- Office.js must load first -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-  <script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js" crossorigin="anonymous"></script>
+
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -61,64 +63,104 @@
   <p id="errorMsg"></p>
   <div id="debugLog"></div>
 
+  <!-- Early debug logging — runs before MSAL loads -->
   <script>
-    const CLIENT_ID    = "d06ae3cf-a7da-4264-b20e-ab8d70c06977";
-    const TENANT_ID    = "04ca7ab1-691d-45a2-928f-574b3e3300a0";
-    const REDIRECT_URI = "https://leighton-grey.github.io/mail-merge-addin/auth-dialog.html";
-    const SCOPES       = ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"];
-
-    Office.initialize = function() {};
-
-    const logEl = document.getElementById("debugLog");
+    var logEl = document.getElementById("debugLog");
     function dbg(msg, isErr) {
-      const d = document.createElement("div");
+      var d = document.createElement("div");
       d.className = "log-line" + (isErr ? " log-err" : "");
       d.textContent = new Date().toISOString().slice(11, 22) + " " + msg;
       logEl.appendChild(d);
       logEl.scrollTop = logEl.scrollHeight;
     }
+    dbg("Page loaded — loading MSAL...");
+  </script>
+
+  <!-- MSAL from jsDelivr (primary) with alcdn fallback -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"
+    crossorigin="anonymous"
+    onerror="dbg('jsDelivr MSAL load FAILED — trying alcdn fallback', true); loadMsalFallback();">
+  </script>
+
+  <script>
+    function loadMsalFallback() {
+      var s = document.createElement("script");
+      s.src = "https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js";
+      s.crossOrigin = "anonymous";
+      s.onload  = function() { dbg("alcdn MSAL fallback loaded OK"); startAuth(); };
+      s.onerror = function() { dbg("BOTH MSAL CDNs failed!", true); showError("Could not load authentication library. Check network connection."); };
+      document.head.appendChild(s);
+    }
+
+    // Check if MSAL loaded from jsDelivr
+    if (typeof msal !== "undefined") {
+      dbg("MSAL loaded OK from jsDelivr");
+    }
+  </script>
+
+  <script>
+    Office.initialize = function() {};
+
+    const CLIENT_ID    = "d06ae3cf-a7da-4264-b20e-ab8d70c06977";
+    const TENANT_ID    = "04ca7ab1-691d-45a2-928f-574b3e3300a0";
+    const REDIRECT_URI = "https://leighton-grey.github.io/mail-merge-addin/auth-dialog.html";
+    const SCOPES       = ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"];
 
     function showError(msg) {
       document.getElementById("spinner").style.display = "none";
       document.getElementById("statusMsg").style.display = "none";
-      const el = document.getElementById("errorMsg");
+      var el = document.getElementById("errorMsg");
       el.textContent = msg;
       el.style.display = "block";
-      dbg("ERROR shown: " + msg, true);
+      dbg("ERROR: " + msg, true);
     }
 
     function sendToParent(data) {
       dbg("sendToParent: " + data.type);
       try {
         Office.context.ui.messageParent(JSON.stringify(data));
-        dbg("messageParent sent OK");
+        dbg("messageParent OK");
       } catch (e) {
         showError("Could not relay token: " + e.message);
       }
     }
 
-    const msalInstance = new msal.PublicClientApplication({
-      auth: {
-        clientId: CLIENT_ID,
-        authority: "https://login.microsoftonline.com/" + TENANT_ID,
-        redirectUri: REDIRECT_URI,
-        navigateToLoginRequestUrl: true
-      },
-      cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false }
-    });
+    var msalInstance = null;
 
-    dbg("MSAL instance created");
+    function createMsalInstance() {
+      try {
+        dbg("Creating MSAL instance...");
+        msalInstance = new msal.PublicClientApplication({
+          auth: {
+            clientId: CLIENT_ID,
+            authority: "https://login.microsoftonline.com/" + TENANT_ID,
+            redirectUri: REDIRECT_URI,
+            navigateToLoginRequestUrl: true
+          },
+          cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false }
+        });
+        dbg("MSAL instance created OK");
+        return true;
+      } catch (e) {
+        dbg("MSAL instance creation FAILED: " + e.message, true);
+        showError("Auth library init failed: " + e.message);
+        return false;
+      }
+    }
 
     async function run() {
-      dbg("run() called");
+      dbg("run() started");
+      if (!createMsalInstance()) return;
+
       try {
         dbg("calling initialize()...");
         await msalInstance.initialize();
         dbg("initialize() done");
 
         dbg("calling handleRedirectPromise()...");
-        const redirectResponse = await msalInstance.handleRedirectPromise();
-        dbg("handleRedirectPromise() done — " + (redirectResponse ? "GOT TOKEN" : "null"));
+        var redirectResponse = await msalInstance.handleRedirectPromise();
+        dbg("handleRedirectPromise() done — " + (redirectResponse ? "GOT RESPONSE" : "null"));
 
         if (redirectResponse && redirectResponse.accessToken) {
           dbg("Sending token to parent");
@@ -126,56 +168,63 @@
           return;
         }
 
-        const accounts = msalInstance.getAllAccounts();
+        var accounts = msalInstance.getAllAccounts();
         dbg("accounts: " + accounts.length);
 
         if (accounts.length > 0) {
           try {
             dbg("trying silent...");
-            const silent = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
-            dbg("silent OK — sending token");
+            var silent = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
+            dbg("silent OK");
             sendToParent({ type: "token", token: silent.accessToken });
             return;
           } catch (se) {
-            dbg("silent failed: " + se.message);
+            dbg("silent failed: " + (se.errorCode || se.message));
           }
         }
 
         document.getElementById("statusMsg").textContent = "Redirecting to sign-in…";
         dbg("calling acquireTokenRedirect...");
         await msalInstance.acquireTokenRedirect({ scopes: SCOPES });
-        dbg("acquireTokenRedirect returned (unexpected — should have navigated away)");
+        dbg("acquireTokenRedirect returned (page should have navigated)");
 
       } catch (e) {
-        const code = e.errorCode || "";
-        const msg  = e.errorMessage || e.message || "Unknown error";
+        var code = e.errorCode || "";
+        var msg  = e.errorMessage || e.message || "Unknown error";
         dbg("CATCH: " + code + " — " + msg, true);
 
         if (code === "interaction_in_progress") {
           sessionStorage.clear();
-          const m = "Sign-in was interrupted. Close and try again.";
+          var m = "Sign-in interrupted. Close and try again.";
           showError(m);
-          setTimeout(() => sendToParent({ type: "error", message: m }), 3000);
+          setTimeout(function() { sendToParent({ type: "error", message: m }); }, 3000);
           return;
         }
         showError(msg);
-        setTimeout(() => sendToParent({ type: "error", message: msg }), 3000);
+        setTimeout(function() { sendToParent({ type: "error", message: msg }); }, 3000);
       }
     }
 
-    dbg("registering Office.onReady...");
-    Office.onReady(() => {
-      dbg("Office.onReady fired — calling run()");
-      run();
-    });
-
-    // Fallback: if Office.onReady hasn't fired in 5s, call run() anyway
-    setTimeout(() => {
-      if (logEl.children.length < 3) {
-        dbg("Office.onReady timeout — calling run() directly");
+    function startAuth() {
+      dbg("registering Office.onReady...");
+      Office.onReady(function() {
+        dbg("Office.onReady fired");
         run();
-      }
-    }, 5000);
+      });
+      // Fallback if onReady never fires
+      setTimeout(function() {
+        if (!msalInstance) {
+          dbg("Office.onReady timeout — running directly");
+          run();
+        }
+      }, 5000);
+    }
+
+    // Only start if MSAL loaded synchronously (jsDelivr path)
+    if (typeof msal !== "undefined") {
+      startAuth();
+    }
+    // If MSAL didn't load, loadMsalFallback() will call startAuth() on success
   </script>
 </body>
 </html>
