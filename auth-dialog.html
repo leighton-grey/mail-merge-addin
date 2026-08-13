@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mail Merge – Sign In</title>
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self';
+             script-src 'self' https://appsforoffice.microsoft.com https://alcdn.msauth.net 'unsafe-inline';
+             connect-src 'self' https://login.microsoftonline.com https://login.microsoft.com https://graph.microsoft.com https://sts.windows.net;
+             style-src 'self' 'unsafe-inline';
+             img-src 'self' data: https://login.microsoftonline.com;
+             frame-src 'self' https://login.microsoftonline.com https://login.microsoft.com;" />
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js" crossorigin="anonymous"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Tahoma, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      background: #f3f2f1;
+      color: #323130;
+    }
+    .container { text-align: center; padding: 24px; }
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid #edebe9;
+      border-top-color: #534AB7;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 16px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    p { font-size: 14px; color: #605e5c; line-height: 1.5; }
+    .error-msg { color: #d13438; font-size: 13px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="spinner" id="spinner"></div>
+    <p id="statusMsg">Signing you in to Mail Merge…</p>
+    <p class="error-msg" id="errorMsg" style="display:none;"></p>
+  </div>
+  <script>
+    const CLIENT_ID    = "d06ae3cf-a7da-4264-b20e-ab8d70c06977";
+    const TENANT_ID    = "04ca7ab1-691d-45a2-928f-574b3e3300a0";
+    const REDIRECT_URI = "https://leighton-grey.github.io/mail-merge-addin/auth-dialog.html";
+    const SCOPES = [
+      "https://graph.microsoft.com/Mail.Send",
+      "https://graph.microsoft.com/User.Read",
+      "https://graph.microsoft.com/Contacts.Read",
+      "https://graph.microsoft.com/People.Read"
+    ];
+
+    Office.initialize = function() {};
+
+    function showError(msg) {
+      document.getElementById("spinner").style.display = "none";
+      document.getElementById("statusMsg").style.display = "none";
+      const el = document.getElementById("errorMsg");
+      el.textContent = msg;
+      el.style.display = "block";
+    }
+
+    function sendToParent(data) {
+      try {
+        Office.context.ui.messageParent(JSON.stringify(data));
+      } catch (e) {
+        showError("Could not relay token to add-in: " + e.message);
+      }
+    }
+
+    const msalInstance = new msal.PublicClientApplication({
+      auth: {
+        clientId: CLIENT_ID,
+        authority: "https://login.microsoftonline.com/" + TENANT_ID,
+        redirectUri: REDIRECT_URI,
+        navigateToLoginRequestUrl: true
+      },
+      cache: {
+        cacheLocation: "sessionStorage",
+        storeAuthStateInCookie: true
+      }
+    });
+
+    async function run() {
+      try {
+        // 1. Handle redirect coming back from Microsoft login
+        const redirectResponse = await msalInstance.handleRedirectPromise();
+        if (redirectResponse && redirectResponse.accessToken) {
+          sendToParent({ type: "token", token: redirectResponse.accessToken });
+          return;
+        }
+
+        // 2. Try silent token from cache
+        const accounts = msalInstance.getAllAccounts();
+        if (accounts.length > 0) {
+          try {
+            const silentResult = await msalInstance.acquireTokenSilent({
+              scopes: SCOPES,
+              account: accounts[0]
+            });
+            sendToParent({ type: "token", token: silentResult.accessToken });
+            return;
+          } catch (_silentErr) {
+            // Fall through to interactive
+          }
+        }
+
+        // 3. Interactive redirect login (supports JumpCloud federation)
+        document.getElementById("statusMsg").textContent = "Redirecting to sign-in…";
+        await msalInstance.acquireTokenRedirect({ scopes: SCOPES });
+
+      } catch (e) {
+        if (e instanceof msal.BrowserAuthError && e.errorCode === "interaction_in_progress") {
+          // Redirect already in flight — do nothing, page will reload
+          return;
+        }
+        sendToParent({ type: "error", message: e.message || "Authentication failed" });
+      }
+    }
+
+    Office.onReady(() => run());
+  </script>
+</body>
+</html>

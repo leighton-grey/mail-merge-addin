@@ -2350,8 +2350,56 @@ function getAccessToken() {
     Office.context.auth.getAccessTokenAsync(
       { allowSignInPrompt: true, allowConsentPrompt: true, forMSGraphAccess: true },
       (result) => {
-        if (result.status === Office.AsyncResultStatus.Succeeded) resolve(result.value);
-        else reject(new Error(ssoErrorMessage(result.error.code)));
+        if (result.status === Office.AsyncResultStatus.Succeeded) {
+          resolve(result.value);
+        } else {
+          const code = result.error.code;
+          // SSO errors that indicate config/federation issues — fall back to MSAL dialog
+          // (common with JumpCloud IdP, misconfigured Entra, or tenant SSO restrictions)
+          const fallbackCodes = [13001, 13002, 13003, 13004, 13005, 13006, 13007, 13008, 13009, 13010, 13012, 13013];
+          if (fallbackCodes.includes(code)) {
+            log("SSO unavailable (code " + code + ") — opening sign-in dialog…", "warning");
+            getTokenViaDialog().then(resolve).catch(reject);
+          } else {
+            reject(new Error(ssoErrorMessage(code)));
+          }
+        }
+      }
+    );
+  });
+}
+
+/* ─── MSAL DIALOG FALLBACK (for JumpCloud/federation SSO failures) ─ */
+
+function getTokenViaDialog() {
+  return new Promise((resolve, reject) => {
+    const dialogUrl = "https://leighton-grey.github.io/mail-merge-addin/auth-dialog.html";
+    Office.context.ui.displayDialogAsync(
+      dialogUrl,
+      { height: 60, width: 35, promptBeforeOpen: false },
+      (asyncResult) => {
+        if (asyncResult.status === Office.AsyncResultStatus.Failed) {
+          reject(new Error("Could not open sign-in dialog: " + asyncResult.error.message));
+          return;
+        }
+        const dialog = asyncResult.value;
+        dialog.addEventHandler(Office.EventType.DialogMessageReceived, (arg) => {
+          dialog.close();
+          try {
+            const msg = JSON.parse(arg.message);
+            if (msg.type === "token") {
+              resolve(msg.token);
+            } else {
+              reject(new Error(msg.message || "Authentication failed"));
+            }
+          } catch {
+            reject(new Error("Invalid response from auth dialog"));
+          }
+        });
+        dialog.addEventHandler(Office.EventType.DialogEventReceived, (arg) => {
+          // 12006 = user closed the dialog manually
+          reject(new Error(arg.error === 12006 ? "Sign-in cancelled" : "Dialog closed unexpectedly (error " + arg.error + ")"));
+        });
       }
     );
   });
