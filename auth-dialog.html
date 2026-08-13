@@ -7,7 +7,7 @@
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'self';
              script-src 'self' https://appsforoffice.microsoft.com https://alcdn.msauth.net 'unsafe-inline';
-             connect-src 'self' https://login.microsoftonline.com https://login.microsoft.com https://graph.microsoft.com https://sts.windows.net;
+             connect-src 'self' https://login.microsoftonline.com https://login.microsoft.com https://graph.microsoft.com https://sts.windows.net https://appsforoffice.microsoft.com;
              style-src 'self' 'unsafe-inline';
              img-src 'self' data: https://login.microsoftonline.com;
              frame-src 'self' https://login.microsoftonline.com https://login.microsoft.com;" />
@@ -18,43 +18,65 @@
     body {
       font-family: 'Segoe UI', Tahoma, sans-serif;
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
-      height: 100vh;
+      min-height: 100vh;
       background: #f3f2f1;
       color: #323130;
+      padding: 16px;
     }
-    .container { text-align: center; padding: 24px; }
     .spinner {
-      width: 32px;
-      height: 32px;
+      width: 28px; height: 28px;
       border: 3px solid #edebe9;
       border-top-color: #534AB7;
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
-      margin: 0 auto 16px;
+      margin-bottom: 12px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    p { font-size: 14px; color: #605e5c; line-height: 1.5; }
-    .error-msg { color: #d13438; font-size: 13px; margin-top: 12px; }
+    #statusMsg { font-size: 14px; color: #605e5c; margin-bottom: 8px; }
+    #errorMsg  { color: #d13438; font-size: 13px; margin-top: 8px; display: none; }
+    #debugLog  {
+      margin-top: 14px;
+      width: 100%;
+      max-width: 480px;
+      background: #fff;
+      border: 1px solid #e1dfdd;
+      border-radius: 4px;
+      padding: 8px;
+      font-size: 11px;
+      font-family: monospace;
+      color: #201f1e;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+    .log-line { padding: 1px 0; border-bottom: 1px solid #f3f2f1; }
+    .log-err  { color: #d13438; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="spinner" id="spinner"></div>
-    <p id="statusMsg">Signing you in to Mail Merge…</p>
-    <p class="error-msg" id="errorMsg" style="display:none;"></p>
-  </div>
+  <div class="spinner" id="spinner"></div>
+  <p id="statusMsg">Signing you in to Mail Merge…</p>
+  <p id="errorMsg"></p>
+  <div id="debugLog"></div>
+
   <script>
     const CLIENT_ID    = "d06ae3cf-a7da-4264-b20e-ab8d70c06977";
     const TENANT_ID    = "04ca7ab1-691d-45a2-928f-574b3e3300a0";
     const REDIRECT_URI = "https://leighton-grey.github.io/mail-merge-addin/auth-dialog.html";
-    const SCOPES = [
-      "https://graph.microsoft.com/Mail.Send",
-      "https://graph.microsoft.com/User.Read"
-    ];
+    const SCOPES       = ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"];
 
     Office.initialize = function() {};
+
+    const logEl = document.getElementById("debugLog");
+    function dbg(msg, isErr) {
+      const d = document.createElement("div");
+      d.className = "log-line" + (isErr ? " log-err" : "");
+      d.textContent = new Date().toISOString().slice(11, 22) + " " + msg;
+      logEl.appendChild(d);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
 
     function showError(msg) {
       document.getElementById("spinner").style.display = "none";
@@ -62,11 +84,14 @@
       const el = document.getElementById("errorMsg");
       el.textContent = msg;
       el.style.display = "block";
+      dbg("ERROR shown: " + msg, true);
     }
 
     function sendToParent(data) {
+      dbg("sendToParent: " + data.type);
       try {
         Office.context.ui.messageParent(JSON.stringify(data));
+        dbg("messageParent sent OK");
       } catch (e) {
         showError("Could not relay token: " + e.message);
       }
@@ -79,59 +104,78 @@
         redirectUri: REDIRECT_URI,
         navigateToLoginRequestUrl: true
       },
-      cache: {
-        cacheLocation: "sessionStorage",
-        storeAuthStateInCookie: false
-      }
+      cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false }
     });
 
-    async function run() {
-      try {
-        // Required in MSAL browser v2.37+ — must await before any other calls
-        await msalInstance.initialize();
+    dbg("MSAL instance created");
 
-        // 1. Handle redirect coming back from Microsoft login
+    async function run() {
+      dbg("run() called");
+      try {
+        dbg("calling initialize()...");
+        await msalInstance.initialize();
+        dbg("initialize() done");
+
+        dbg("calling handleRedirectPromise()...");
         const redirectResponse = await msalInstance.handleRedirectPromise();
+        dbg("handleRedirectPromise() done — " + (redirectResponse ? "GOT TOKEN" : "null"));
+
         if (redirectResponse && redirectResponse.accessToken) {
+          dbg("Sending token to parent");
           sendToParent({ type: "token", token: redirectResponse.accessToken });
           return;
         }
 
-        // 2. Try silent token from cache
         const accounts = msalInstance.getAllAccounts();
+        dbg("accounts: " + accounts.length);
+
         if (accounts.length > 0) {
           try {
-            const silentResult = await msalInstance.acquireTokenSilent({
-              scopes: SCOPES,
-              account: accounts[0]
-            });
-            sendToParent({ type: "token", token: silentResult.accessToken });
+            dbg("trying silent...");
+            const silent = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
+            dbg("silent OK — sending token");
+            sendToParent({ type: "token", token: silent.accessToken });
             return;
-          } catch (_silentErr) {
-            // Fall through to interactive
+          } catch (se) {
+            dbg("silent failed: " + se.message);
           }
         }
 
-        // 3. Interactive redirect login (supports JumpCloud federation)
         document.getElementById("statusMsg").textContent = "Redirecting to sign-in…";
+        dbg("calling acquireTokenRedirect...");
         await msalInstance.acquireTokenRedirect({ scopes: SCOPES });
+        dbg("acquireTokenRedirect returned (unexpected — should have navigated away)");
 
       } catch (e) {
-        if (e instanceof msal.BrowserAuthError && e.errorCode === "interaction_in_progress") {
-          // Stale MSAL state — clear and tell the user to retry
+        const code = e.errorCode || "";
+        const msg  = e.errorMessage || e.message || "Unknown error";
+        dbg("CATCH: " + code + " — " + msg, true);
+
+        if (code === "interaction_in_progress") {
           sessionStorage.clear();
-          const msg = "A previous sign-in was interrupted. Close this dialog and click Sign In again.";
-          showError(msg);
-          setTimeout(() => sendToParent({ type: "error", message: msg }), 3000);
+          const m = "Sign-in was interrupted. Close and try again.";
+          showError(m);
+          setTimeout(() => sendToParent({ type: "error", message: m }), 3000);
           return;
         }
-        const msg = e.errorMessage || e.message || "Authentication failed";
         showError(msg);
         setTimeout(() => sendToParent({ type: "error", message: msg }), 3000);
       }
     }
 
-    Office.onReady(() => run());
+    dbg("registering Office.onReady...");
+    Office.onReady(() => {
+      dbg("Office.onReady fired — calling run()");
+      run();
+    });
+
+    // Fallback: if Office.onReady hasn't fired in 5s, call run() anyway
+    setTimeout(() => {
+      if (logEl.children.length < 3) {
+        dbg("Office.onReady timeout — calling run() directly");
+        run();
+      }
+    }, 5000);
   </script>
 </body>
 </html>

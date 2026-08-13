@@ -2373,7 +2373,7 @@ function getAccessToken() {
 
 function getTokenViaDialog() {
   return new Promise((resolve, reject) => {
-    const dialogUrl = "https://leighton-grey.github.io/mail-merge-addin/auth-dialog.html?v=2";
+    const dialogUrl = "https://leighton-grey.github.io/mail-merge-addin/auth-dialog.html?v=3";
     Office.context.ui.displayDialogAsync(
       dialogUrl,
       { height: 60, width: 35, promptBeforeOpen: false },
