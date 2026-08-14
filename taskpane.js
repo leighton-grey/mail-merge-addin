@@ -1,4 +1,4 @@
-/* Mail Merge Engine v2.4.0
+/* Mail Merge Engine v2.5.0
  * Auth: Office.js SSO -> Microsoft Graph API
  * Batching: 20 requests per Graph $batch call (reduced dynamically when attachment present)
  * Privacy: Subject + CSV cached in browser localStorage only. Nothing stored server-side.
