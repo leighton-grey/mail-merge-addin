@@ -5,6 +5,14 @@
 
 /* ─── CSS Custom Properties ──────────────────────────────────── */
 :root {
+  /* ── PRMT Brand ────────────────────────────────── */
+  --prmt-orange:      #F58220;
+  --prmt-orange-dark: #D96610;
+  --prmt-orange-glow: rgba(245,130,32,0.38);
+  --prmt-black:       #1C1C1E;
+  --prmt-black-hover: #2E2E30;
+
+  /* ── Accent (purple UI chrome) ─────────────────── */
   --accent:        #534AB7;
   --accent-dark:   #3D35A0;
   --accent-light:  #7068CC;
@@ -92,14 +100,7 @@ body {
   flex: 1;
 }
 
-.header-version {
-  font-size: 10px;
-  font-weight: 600;
-  background: rgba(255,255,255,0.18);
-  border-radius: 99px;
-  padding: 2px 8px;
-  letter-spacing: 0.02em;
-}
+/* .header-version removed — version moved to About section in Options tab */
 
 /* ─── Tab Bar ────────────────────────────────────────────────── */
 .tab-bar {
@@ -252,10 +253,12 @@ body {
 }
 
 /* ─── Buttons ────────────────────────────────────────────────── */
+
+/* Primary — PRMT orange (Run / confirm actions) */
 .btn-primary {
   width: 100%;
-  padding: 10px;
-  background: linear-gradient(135deg, #5B52C0 0%, #3D35A0 100%);
+  padding: 10px 14px;
+  background: linear-gradient(135deg, var(--prmt-orange) 0%, var(--prmt-orange-dark) 100%);
   color: #fff;
   border: none;
   border-radius: var(--radius-sm);
@@ -263,14 +266,14 @@ body {
   font-weight: 700;
   cursor: pointer;
   font-family: inherit;
-  letter-spacing: 0.01em;
-  box-shadow: 0 2px 6px rgba(83,74,183,0.30);
+  letter-spacing: 0.02em;
+  box-shadow: 0 2px 8px var(--prmt-orange-glow);
   transition: background var(--transition), box-shadow var(--transition), transform var(--transition);
 }
 
 .btn-primary:hover {
-  background: linear-gradient(135deg, #6760D0 0%, #4840B5 100%);
-  box-shadow: 0 3px 10px rgba(83,74,183,0.40);
+  background: linear-gradient(135deg, #FF9030 0%, #E87018 100%);
+  box-shadow: 0 4px 14px var(--prmt-orange-glow);
   transform: translateY(-1px);
 }
 
@@ -282,9 +285,36 @@ body {
   cursor: not-allowed;
 }
 
+/* Preview — PRMT charcoal/black (distinct from secondary, turns orange on hover) */
+.btn-preview {
+  padding: 6px 14px;
+  background: linear-gradient(135deg, var(--prmt-black-hover) 0%, var(--prmt-black) 100%);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  letter-spacing: 0.01em;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.28);
+  transition: background var(--transition), box-shadow var(--transition), transform var(--transition);
+  white-space: nowrap;
+}
+
+.btn-preview:hover {
+  background: linear-gradient(135deg, var(--prmt-orange) 0%, var(--prmt-orange-dark) 100%);
+  box-shadow: 0 3px 10px var(--prmt-orange-glow);
+  transform: translateY(-1px);
+}
+
+.btn-preview:active { transform: translateY(0); }
+.btn-preview:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Secondary — clean white gradient, warm orange hover */
 .btn-secondary {
   padding: 6px 12px;
-  background: var(--surface);
+  background: linear-gradient(180deg, #FFFFFF 0%, #F5F5F5 100%);
   color: var(--text-secondary);
   border: 1.5px solid var(--border);
   border-radius: var(--radius-sm);
@@ -292,17 +322,23 @@ body {
   font-weight: 500;
   cursor: pointer;
   font-family: inherit;
-  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  transition: background var(--transition), border-color var(--transition),
+              color var(--transition), box-shadow var(--transition), transform var(--transition);
 }
 
 .btn-secondary:hover {
-  background: var(--accent-bg);
-  border-color: var(--accent-border);
-  color: var(--accent);
+  background: linear-gradient(180deg, #FFF8F0 0%, #FFEEDD 100%);
+  border-color: #F5A060;
+  color: var(--prmt-orange-dark);
+  box-shadow: 0 2px 6px rgba(245,130,32,0.18);
+  transform: translateY(-1px);
 }
 
-.btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-secondary:active { transform: translateY(0); }
+.btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
+/* Danger — red (Stop button) */
 .btn-danger {
   padding: 10px 14px;
   background: var(--danger);
@@ -361,25 +397,37 @@ body {
 .tag {
   background: var(--accent-bg);
   color: var(--accent-dark);
-  font-size: 11px;
-  font-weight: 500;
-  padding: 3px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 5px 12px;
   border-radius: 99px;
-  border: 1px solid var(--accent-border);
+  border: 1.5px solid var(--accent-border);
   cursor: pointer;
   font-family: monospace;
-  transition: background var(--transition), border-color var(--transition), transform var(--transition);
+  box-shadow: 0 1px 3px rgba(83,74,183,0.10);
+  transition: background var(--transition), border-color var(--transition),
+              box-shadow var(--transition), transform var(--transition), color var(--transition);
+  /* Tap affordance */
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
 }
 
 .tag:hover {
-  background: var(--bg-hover);
-  border-color: var(--accent);
-  transform: translateY(-1px);
+  background: linear-gradient(135deg, #FFF0DC 0%, #FFE8C8 100%);
+  border-color: var(--prmt-orange);
+  color: var(--prmt-orange-dark);
+  box-shadow: 0 2px 8px rgba(245,130,32,0.22);
+  transform: translateY(-2px);
+}
+
+.tag:active {
+  transform: translateY(0) scale(0.97);
+  box-shadow: none;
 }
 
 .tag:focus {
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline-offset: 2px;
   border-radius: 99px;
 }
 
@@ -800,13 +848,59 @@ body {
   border: 1px solid rgba(255,255,255,0.05);
 }
 
-/* ─── Footer disclaimer ──────────────────────────────────────── */
-.footer {
-  margin: 10px 10px 0;
-  font-size: 10px;
+/* ─── Footer disclosure (collapsible privacy note) ───────────── */
+.footer-disclosure {
+  margin: 8px 10px 4px;
+}
+
+.footer-disclosure-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 100%;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
   color: var(--text-muted);
-  line-height: 1.6;
+  background: none;
+  border: none;
+  cursor: pointer;
+  list-style: none;
+  font-family: inherit;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition), background var(--transition);
+}
+
+/* Remove default marker in all browsers */
+.footer-disclosure-btn::-webkit-details-marker { display: none; }
+
+.footer-disclosure-btn::after {
+  content: '›';
+  font-size: 13px;
+  transition: transform var(--transition);
+  display: inline-block;
+}
+
+details[open] .footer-disclosure-btn::after {
+  transform: rotate(90deg);
+}
+
+.footer-disclosure-btn:hover {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.footer-disclosure-body {
+  margin-top: 6px;
+  padding: 10px 12px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  line-height: 1.65;
   text-align: center;
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
 }
 
 /* ─── Code inline ────────────────────────────────────────────── */
@@ -841,6 +935,157 @@ code {
 
 .template-row .input-inline { flex: 1; min-width: 80px; }
 .template-row .select-inline { flex: 1; min-width: 100px; }
+
+/* ─── Tags header ────────────────────────────────────────────── */
+.tags-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 16px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.tags-hint {
+  font-size: 11px;
+  color: var(--prmt-orange-dark);
+  font-weight: 500;
+}
+
+/* ─── Hint-advanced collapsible ──────────────────────────────── */
+.hint-advanced {
+  margin-top: 6px;
+}
+
+.hint-advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  padding: 2px 0;
+  transition: color var(--transition);
+}
+
+.hint-advanced-toggle::-webkit-details-marker { display: none; }
+
+.hint-advanced-toggle::before {
+  content: '›';
+  font-size: 13px;
+  display: inline-block;
+  transition: transform var(--transition);
+}
+
+details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
+
+.hint-advanced-toggle:hover { color: var(--accent-dark); }
+
+.hint-advanced-body {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.8;
+}
+
+/* ─── About Section ──────────────────────────────────────────── */
+.about-section {
+  background: linear-gradient(135deg, #FFFBF7 0%, #FFF5EC 100%);
+  border-color: rgba(245,130,32,0.22);
+}
+
+.about-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.about-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 11px;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.14);
+  flex-shrink: 0;
+}
+
+.about-meta { flex: 1; }
+
+.about-app-name {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.about-version-badge {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--prmt-orange) 0%, var(--prmt-orange-dark) 100%);
+  color: #fff;
+  padding: 2px 9px;
+  border-radius: 99px;
+  letter-spacing: 0.06em;
+}
+
+.about-tagline {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
+.about-links {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.about-link {
+  font-size: 11.5px;
+  color: var(--prmt-orange);
+  text-decoration: none;
+  font-weight: 600;
+  transition: color var(--transition);
+}
+
+.about-link:hover {
+  color: var(--prmt-orange-dark);
+  text-decoration: underline;
+}
+
+.about-sep {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.about-developer {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(245,130,32,0.14);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.about-developer strong {
+  color: var(--prmt-orange-dark);
+  font-weight: 700;
+}
 
 /* ─── Utility ────────────────────────────────────────────────── */
 .hidden { display: none !important; }

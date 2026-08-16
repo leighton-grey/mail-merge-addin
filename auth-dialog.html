@@ -16,71 +16,350 @@
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      font-family: 'Segoe UI', Tahoma, sans-serif;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+      background: linear-gradient(140deg, #0C0A1A 0%, #16123A 45%, #0D1B38 100%);
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      min-height: 100vh;
-      background: #f3f2f1;
-      color: #323130;
-      padding: 16px;
+      padding: 20px;
+      color: #fff;
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
     }
-    .spinner {
-      width: 28px; height: 28px;
-      border: 3px solid #edebe9;
-      border-top-color: #534AB7;
+
+    /* ── Ambient background orbs ─────────────────────── */
+    .bg-orb {
+      position: fixed;
       border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-      margin-bottom: 12px;
+      filter: blur(70px);
+      pointer-events: none;
+      z-index: 0;
     }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #statusMsg { font-size: 14px; color: #605e5c; margin-bottom: 8px; }
-    #errorMsg  { color: #d13438; font-size: 13px; margin-top: 8px; display: none; }
-    #debugLog  {
-      margin-top: 14px;
+    .bg-orb-1 {
+      width: 340px; height: 340px;
+      background: rgba(83,74,183,0.25);
+      top: -100px; right: -100px;
+      animation: drift 9s ease-in-out infinite;
+    }
+    .bg-orb-2 {
+      width: 220px; height: 220px;
+      background: rgba(245,130,32,0.18);
+      bottom: -70px; left: -50px;
+      animation: drift 11s ease-in-out infinite reverse;
+    }
+    .bg-orb-3 {
+      width: 160px; height: 160px;
+      background: rgba(83,74,183,0.12);
+      bottom: 30%; right: -40px;
+      animation: drift 7s ease-in-out infinite 2s;
+    }
+    @keyframes drift {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      50%       { transform: translate(16px, -20px) scale(1.05); }
+    }
+
+    /* ── Card ────────────────────────────────────────── */
+    .card {
+      position: relative;
+      z-index: 1;
+      background: rgba(255,255,255,0.045);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 24px;
+      padding: 44px 36px 30px;
       width: 100%;
-      max-width: 480px;
-      background: #fff;
-      border: 1px solid #e1dfdd;
-      border-radius: 4px;
-      padding: 8px;
-      font-size: 11px;
-      font-family: monospace;
-      color: #201f1e;
-      max-height: 260px;
-      overflow-y: auto;
+      max-width: 360px;
+      text-align: center;
+      box-shadow:
+        0 30px 80px rgba(0,0,0,0.55),
+        inset 0 1px 0 rgba(255,255,255,0.12),
+        inset 0 -1px 0 rgba(0,0,0,0.2);
     }
-    .log-line { padding: 1px 0; border-bottom: 1px solid #f3f2f1; }
-    .log-err  { color: #d13438; }
+
+    /* ── Icon + pulse rings ──────────────────────────── */
+    .icon-wrap {
+      position: relative;
+      width: 80px; height: 80px;
+      margin: 0 auto 26px;
+    }
+
+    /* Rings animate outward from the icon */
+    .pulse-ring {
+      position: absolute;
+      inset: 0;
+      border: 1.5px solid rgba(245,130,32,0.55);
+      border-radius: 20px;
+      animation: pulse-out 2.6s cubic-bezier(0.3,0,0.7,1) infinite;
+      pointer-events: none;
+    }
+    .pulse-ring:nth-child(2) { animation-delay: 0.87s; }
+    .pulse-ring:nth-child(3) { animation-delay: 1.74s; }
+
+    @keyframes pulse-out {
+      0%   { opacity: 0.75; transform: scale(1); }
+      70%  { opacity: 0.2; }
+      100% { opacity: 0;   transform: scale(1.9); }
+    }
+
+    .icon-img {
+      position: relative;
+      z-index: 1;
+      width: 80px; height: 80px;
+      border-radius: 18px;
+      box-shadow:
+        0 10px 28px rgba(0,0,0,0.45),
+        0 0 0 1px rgba(255,255,255,0.10);
+    }
+
+    /* Error state — icon turns red-ish */
+    .icon-img.error-state { filter: grayscale(0.4) brightness(0.8); }
+
+    /* ── App name + byline ───────────────────────────── */
+    .app-name {
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #fff;
+      margin-bottom: 5px;
+    }
+
+    .by-line {
+      font-size: 10.5px;
+      color: rgba(255,255,255,0.30);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 30px;
+    }
+
+    /* ── Step label ──────────────────────────────────── */
+    #stepLabel {
+      font-size: 13.5px;
+      color: rgba(255,255,255,0.65);
+      margin-bottom: 14px;
+      min-height: 20px;
+      transition: opacity 0.25s;
+    }
+
+    /* ── Progress bar ────────────────────────────────── */
+    .progress-track {
+      background: rgba(255,255,255,0.08);
+      border-radius: 99px;
+      height: 5px;
+      overflow: hidden;
+      margin-bottom: 18px;
+    }
+
+    #progressFill {
+      height: 100%;
+      border-radius: 99px;
+      width: 0%;
+      background: linear-gradient(90deg, #534AB7 0%, #F58220 100%);
+      box-shadow: 0 0 12px rgba(245,130,32,0.5);
+      transition: width 0.55s cubic-bezier(0.4,0,0.2,1);
+      position: relative;
+    }
+
+    /* Shimmer on the fill */
+    #progressFill::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(255,255,255,0.4) 50%,
+        transparent 100%
+      );
+      background-size: 200% 100%;
+      animation: shimmer 1.8s ease infinite;
+    }
+
+    @keyframes shimmer {
+      0%   { background-position: -200% 0; }
+      100% { background-position:  200% 0; }
+    }
+
+    /* ── Step dots ───────────────────────────────────── */
+    .step-dots {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 26px;
+    }
+
+    .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.13);
+      transition: all 0.35s cubic-bezier(0.4,0,0.2,1);
+    }
+
+    .dot.active {
+      background: #F58220;
+      box-shadow: 0 0 10px rgba(245,130,32,0.8);
+      transform: scale(1.35);
+    }
+
+    .dot.done {
+      background: rgba(245,130,32,0.4);
+      transform: scale(1);
+    }
+
+    /* ── Error box ───────────────────────────────────── */
+    #errorBox {
+      display: none;
+      background: rgba(192,37,42,0.14);
+      border: 1px solid rgba(192,37,42,0.30);
+      border-radius: 10px;
+      padding: 11px 14px;
+      font-size: 12.5px;
+      color: #F07070;
+      margin-bottom: 18px;
+      text-align: left;
+      line-height: 1.55;
+    }
+
+    /* ── Divider ─────────────────────────────────────── */
+    .divider {
+      height: 1px;
+      background: rgba(255,255,255,0.07);
+      margin: 0 -36px 14px;
+    }
+
+    /* ── Debug log ───────────────────────────────────── */
+    #debugLog {
+      width: 100%;
+      max-height: 120px;
+      overflow-y: auto;
+      font-family: 'Cascadia Code', 'Consolas', monospace;
+      font-size: 10px;
+      color: rgba(255,255,255,0.28);
+      text-align: left;
+      line-height: 1.75;
+    }
+
+    #debugLog::-webkit-scrollbar { width: 3px; }
+    #debugLog::-webkit-scrollbar-track { background: transparent; }
+    #debugLog::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.12);
+      border-radius: 99px;
+    }
+
+    .log-line {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .log-err { color: rgba(240,112,112,0.75); }
+    .log-ok  { color: rgba(111,207,151,0.6); }
   </style>
 </head>
 <body>
-  <div class="spinner" id="spinner"></div>
-  <p id="statusMsg">Signing you in to Mail Merge…</p>
-  <p id="errorMsg"></p>
-  <div id="debugLog"></div>
 
-  <!-- Early debug logging — runs before MSAL loads -->
+  <!-- Ambient orbs -->
+  <div class="bg-orb bg-orb-1"></div>
+  <div class="bg-orb bg-orb-2"></div>
+  <div class="bg-orb bg-orb-3"></div>
+
+  <div class="card">
+
+    <!-- Icon with pulse rings -->
+    <div class="icon-wrap">
+      <div class="pulse-ring"></div>
+      <div class="pulse-ring"></div>
+      <div class="pulse-ring"></div>
+      <img src="assets/icon-color.png" alt="Mail Merge" class="icon-img" id="iconImg" />
+    </div>
+
+    <div class="app-name">Mail Merge</div>
+    <div class="by-line">by Promethean IT</div>
+
+    <!-- Current step label -->
+    <div id="stepLabel">Loading authentication…</div>
+
+    <!-- Progress bar -->
+    <div class="progress-track">
+      <div id="progressFill"></div>
+    </div>
+
+    <!-- Step dots (5 stages) -->
+    <div class="step-dots">
+      <div class="dot active" id="dot0" title="Loading"></div>
+      <div class="dot"        id="dot1" title="Office ready"></div>
+      <div class="dot"        id="dot2" title="Initialising"></div>
+      <div class="dot"        id="dot3" title="Checking session"></div>
+      <div class="dot"        id="dot4" title="Signing in"></div>
+    </div>
+
+    <!-- Error box (hidden until error) -->
+    <div id="errorBox"></div>
+
+    <div class="divider"></div>
+
+    <!-- Inline debug log -->
+    <div id="debugLog"></div>
+
+  </div>
+
+  <!-- ── Early logging — fires before MSAL loads ────────────── -->
   <script>
     var logEl = document.getElementById("debugLog");
-    function dbg(msg, isErr) {
+
+    function dbg(msg, cls) {
       var d = document.createElement("div");
-      d.className = "log-line" + (isErr ? " log-err" : "");
+      d.className = "log-line" + (cls ? " " + cls : "");
       d.textContent = new Date().toISOString().slice(11, 22) + " " + msg;
       logEl.appendChild(d);
       logEl.scrollTop = logEl.scrollHeight;
     }
+
+    // Step-progress helpers
+    var STEPS = [
+      "Loading authentication…",
+      "Preparing Office runtime…",
+      "Initialising secure session…",
+      "Checking for existing sign-in…",
+      "Redirecting to Microsoft…"
+    ];
+    var PROGRESS = [12, 28, 52, 72, 92];
+
+    function setStep(n, labelOverride) {
+      document.getElementById("stepLabel").textContent = labelOverride || STEPS[n] || "";
+      document.getElementById("progressFill").style.width = PROGRESS[n] + "%";
+      for (var i = 0; i < 5; i++) {
+        var dot = document.getElementById("dot" + i);
+        dot.className = "dot" + (i < n ? " done" : i === n ? " active" : "");
+      }
+    }
+
+    function showError(msg) {
+      // Stop pulse rings
+      var rings = document.querySelectorAll(".pulse-ring");
+      rings.forEach(function(r) { r.style.animationPlayState = "paused"; r.style.opacity = "0"; });
+      document.getElementById("iconImg").classList.add("error-state");
+      document.getElementById("progressFill").style.background = "#C4252A";
+      document.getElementById("progressFill").style.boxShadow = "none";
+      document.getElementById("progressFill").style.width = "100%";
+      document.getElementById("stepLabel").textContent = "Sign-in failed";
+      var box = document.getElementById("errorBox");
+      box.textContent = msg;
+      box.style.display = "block";
+      dbg("ERROR: " + msg, "log-err");
+    }
+
     dbg("Page loaded — loading MSAL...");
+    setStep(0);
   </script>
 
   <!-- MSAL from jsDelivr (primary) with alcdn fallback -->
   <script
     src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"
     crossorigin="anonymous"
-    onerror="dbg('jsDelivr MSAL load FAILED — trying alcdn fallback', true); loadMsalFallback();">
+    onerror="dbg('jsDelivr MSAL FAILED — trying alcdn', 'log-err'); loadMsalFallback();">
   </script>
 
   <script>
@@ -88,14 +367,16 @@
       var s = document.createElement("script");
       s.src = "https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js";
       s.crossOrigin = "anonymous";
-      s.onload  = function() { dbg("alcdn MSAL fallback loaded OK"); startAuth(); };
-      s.onerror = function() { dbg("BOTH MSAL CDNs failed!", true); showError("Could not load authentication library. Check network connection."); };
+      s.onload  = function() { dbg("alcdn fallback loaded OK", "log-ok"); startAuth(); };
+      s.onerror = function() {
+        dbg("BOTH MSAL CDNs failed!", "log-err");
+        showError("Could not load the authentication library. Please check your network connection and try again.");
+      };
       document.head.appendChild(s);
     }
 
-    // Check if MSAL loaded from jsDelivr
     if (typeof msal !== "undefined") {
-      dbg("MSAL loaded OK from jsDelivr");
+      dbg("MSAL loaded OK from jsDelivr", "log-ok");
     }
   </script>
 
@@ -107,22 +388,13 @@
     const REDIRECT_URI = "https://leighton-grey.github.io/mail-merge-addin/auth-dialog.html";
     const SCOPES       = ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"];
 
-    function showError(msg) {
-      document.getElementById("spinner").style.display = "none";
-      document.getElementById("statusMsg").style.display = "none";
-      var el = document.getElementById("errorMsg");
-      el.textContent = msg;
-      el.style.display = "block";
-      dbg("ERROR: " + msg, true);
-    }
-
     function sendToParent(data) {
-      dbg("sendToParent: " + data.type);
+      dbg("sendToParent → " + data.type);
       try {
         Office.context.ui.messageParent(JSON.stringify(data));
-        dbg("messageParent OK");
+        dbg("messageParent OK", "log-ok");
       } catch (e) {
-        showError("Could not relay token: " + e.message);
+        showError("Could not relay sign-in result: " + e.message);
       }
     }
 
@@ -140,10 +412,10 @@
           },
           cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false }
         });
-        dbg("MSAL instance created OK");
+        dbg("MSAL instance created OK", "log-ok");
         return true;
       } catch (e) {
-        dbg("MSAL instance creation FAILED: " + e.message, true);
+        dbg("MSAL instance creation FAILED: " + e.message, "log-err");
         showError("Auth library init failed: " + e.message);
         return false;
       }
@@ -154,28 +426,45 @@
       if (!createMsalInstance()) return;
 
       try {
+        setStep(2, "Initialising secure session…");
         dbg("calling initialize()...");
         await msalInstance.initialize();
-        dbg("initialize() done");
+        dbg("initialize() done", "log-ok");
 
+        setStep(3, "Checking for existing sign-in…");
         dbg("calling handleRedirectPromise()...");
-        var redirectResponse = await msalInstance.handleRedirectPromise();
-        dbg("handleRedirectPromise() done — " + (redirectResponse ? "GOT RESPONSE" : "null"));
+
+        // Race handleRedirectPromise against a 6-second timeout so it never hangs
+        var redirectResponse = await Promise.race([
+          msalInstance.handleRedirectPromise(),
+          new Promise(function(resolve) {
+            setTimeout(function() {
+              dbg("handleRedirectPromise timeout — proceeding");
+              resolve(null);
+            }, 6000);
+          })
+        ]);
+
+        dbg("handleRedirectPromise → " + (redirectResponse ? "GOT RESPONSE" : "null"), "log-ok");
 
         if (redirectResponse && redirectResponse.accessToken) {
-          dbg("Sending token to parent");
+          setStep(4, "Signed in — returning to Mail Merge…");
+          dbg("Sending token to parent", "log-ok");
           sendToParent({ type: "token", token: redirectResponse.accessToken });
           return;
         }
 
+        // Try silent token for existing accounts
         var accounts = msalInstance.getAllAccounts();
-        dbg("accounts: " + accounts.length);
+        dbg("accounts in cache: " + accounts.length);
 
         if (accounts.length > 0) {
           try {
-            dbg("trying silent...");
+            setStep(3, "Restoring your session…");
+            dbg("trying silent token...");
             var silent = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
-            dbg("silent OK");
+            dbg("silent token OK", "log-ok");
+            setStep(4, "Signed in — returning to Mail Merge…");
             sendToParent({ type: "token", token: silent.accessToken });
             return;
           } catch (se) {
@@ -183,19 +472,20 @@
           }
         }
 
-        document.getElementById("statusMsg").textContent = "Redirecting to sign-in…";
+        // Redirect to Microsoft sign-in
+        setStep(4, "Redirecting to Microsoft…");
         dbg("calling acquireTokenRedirect...");
         await msalInstance.acquireTokenRedirect({ scopes: SCOPES });
-        dbg("acquireTokenRedirect returned (page should have navigated)");
+        dbg("acquireTokenRedirect returned (page navigating away)");
 
       } catch (e) {
         var code = e.errorCode || "";
         var msg  = e.errorMessage || e.message || "Unknown error";
-        dbg("CATCH: " + code + " — " + msg, true);
+        dbg("CATCH: " + code + " — " + msg, "log-err");
 
         if (code === "interaction_in_progress") {
           sessionStorage.clear();
-          var m = "Sign-in interrupted. Close and try again.";
+          var m = "Sign-in interrupted. Please close this window and try again.";
           showError(m);
           setTimeout(function() { sendToParent({ type: "error", message: m }); }, 3000);
           return;
@@ -206,12 +496,13 @@
     }
 
     function startAuth() {
+      setStep(1, "Preparing Office runtime…");
       dbg("registering Office.onReady...");
       Office.onReady(function() {
-        dbg("Office.onReady fired");
+        dbg("Office.onReady fired", "log-ok");
         run();
       });
-      // Fallback if onReady never fires
+      // Fallback if onReady never fires within 5 s
       setTimeout(function() {
         if (!msalInstance) {
           dbg("Office.onReady timeout — running directly");
@@ -220,11 +511,9 @@
       }, 5000);
     }
 
-    // Only start if MSAL loaded synchronously (jsDelivr path)
     if (typeof msal !== "undefined") {
       startAuth();
     }
-    // If MSAL didn't load, loadMsalFallback() will call startAuth() on success
   </script>
 </body>
 </html>

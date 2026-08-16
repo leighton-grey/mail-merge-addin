@@ -23,13 +23,12 @@
           crossorigin="anonymous"></script>
 
   <!-- App styles -->
-  <link rel="stylesheet" href="taskpane.css?v=2.5.0" />
+  <link rel="stylesheet" href="taskpane.css?v=2.6.0" />
 </head>
 <body>
   <div class="header">
     <span class="header-icon"><img src="assets/icon-color.png" alt="" /></span>
     <span class="header-title">Mail Merge</span>
-    <span class="header-version">v2.5.0</span>
   </div>
 
   <div class="tab-bar" role="tablist">
@@ -150,22 +149,31 @@
     <div id="tab-compose" class="tab-pane hidden">
 
       <div class="section">
-        <label class="label">Subject</label>
+        <label class="label">Subject line</label>
         <input type="text" id="subjectInput" class="input"
           placeholder="Hi {{first_name}}, update from {{company}}" />
-        <p class="hint" style="margin-top:4px">Use <code>{{column_name}}</code> to personalize. <code>{{if:col=val:yes:no}}</code> for conditionals. Pipe filters: <code>{{name|upper}}</code>, <code>{{amount|currency}}</code>, <code>{{date|date}}</code>, <code>{{name|title}}</code>, <code>{{name|lower}}</code>, <code>{{value|number}}</code>, <code>{{value|trim}}</code>. Smart tokens: <code>{{record_num}}</code>, <code>{{record_count}}</code>.</p>
-        <button class="btn-secondary" id="checkErrorsBtn" style="margin-top:6px;">🔍 Check for errors</button>
+        <p class="hint" style="margin-top:4px;">Use <code>{{first_name}}</code> or any <code>{{column_name}}</code> from your CSV to personalise each email.</p>
+        <details class="hint-advanced">
+          <summary class="hint-advanced-toggle">Advanced tokens &amp; filters</summary>
+          <div class="hint hint-advanced-body">
+            <strong>Conditionals:</strong> <code>{{if:col=val:yes:no}}</code><br>
+            <strong>Filters:</strong> <code>{{name|upper}}</code> <code>{{name|lower}}</code> <code>{{name|title}}</code> <code>{{amount|currency}}</code> <code>{{date|date}}</code> <code>{{value|number}}</code> <code>{{value|trim}}</code><br>
+            <strong>Smart:</strong> <code>{{record_num}}</code> <code>{{record_count}}</code>
+          </div>
+        </details>
+        <button class="btn-secondary" id="checkErrorsBtn" style="margin-top:8px;font-size:11px;">🔍 Check for errors</button>
 
-        <div style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-          <label class="label" style="margin:0;">Insert field at cursor</label>
-          <select id="insertFieldSelect" class="select-inline" style="min-width:120px;">
-            <option value="">— pick field —</option>
-          </select>
-          <button class="btn-secondary" id="insertFieldBtn">Insert into body</button>
+        <!-- Hidden — kept for JS compatibility -->
+        <div style="display:none;">
+          <select id="insertFieldSelect"><option value="">— pick field —</option></select>
+          <button id="insertFieldBtn">Insert into body</button>
         </div>
-        <p class="hint" style="margin-top:2px;">Inserts {{field}} at the current cursor position in the compose window.</p>
 
-        <label class="label" style="margin-top:10px">Field tags</label>
+        <!-- Tag insertion -->
+        <div class="tags-header">
+          <span class="label" style="margin:0;">Personalisation tags</span>
+          <span class="tags-hint">👆 Click any tag to insert it into your email</span>
+        </div>
         <div id="tagBar" class="tag-bar">
           <span class="tag" data-tag="{{first_name}}" tabindex="0" role="button" aria-label="Insert first_name token">{{first_name}}</span>
           <span class="tag" data-tag="{{last_name}}" tabindex="0" role="button" aria-label="Insert last_name token">{{last_name}}</span>
@@ -176,23 +184,30 @@
           <span class="tag tag-smart" data-tag="{{today}}" tabindex="0" role="button" aria-label="Insert today token">{{today}}</span>
           <span class="tag tag-smart" data-tag="{{now}}" tabindex="0" role="button" aria-label="Insert now token">{{now}}</span>
         </div>
-        <div class="custom-tag-row">
-          <input type="text" id="customTagInput" class="input input-inline" placeholder="custom_field_name" />
-          <button class="btn-secondary" id="addCustomTagBtn">+ Add tag</button>
-        </div>
-        <p class="hint">Click a tag to insert it. <code>{{greeting_line}}</code> auto-generates "Dear Mr. Smith" from <code>salutation</code>/<code>first_name</code>/<code>last_name</code>/<code>gender</code>. <code>{{today}}</code> / <code>{{now}}</code> insert send date/time.</p>
-        <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-          <label class="label" style="margin:0;white-space:nowrap;">{{greeting_line}} format</label>
-          <select id="greetingFormat" class="select-inline">
-            <option value="dear_sal_last">Dear [Sal] [Last]</option>
-            <option value="dear_first">Dear [First]</option>
-            <option value="dear_first_last">Dear [First] [Last]</option>
-            <option value="hi_first">Hi [First]</option>
-            <option value="to_sal_last">To [Sal] [Last]</option>
-          </select>
-          <input type="text" id="greetingFallback" class="input input-inline"
-            placeholder="Fallback (e.g. Dear Valued Customer)" style="max-width:180px;" />
-        </div>
+
+        <!-- Advanced: greeting format + custom tags (collapsed) -->
+        <details class="hint-advanced">
+          <summary class="hint-advanced-toggle">Greeting format &amp; custom tags</summary>
+          <div class="hint-advanced-body">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+              <span class="hint-inline">{{greeting_line}} format</span>
+              <select id="greetingFormat" class="select-inline">
+                <option value="dear_sal_last">Dear [Sal] [Last]</option>
+                <option value="dear_first">Dear [First]</option>
+                <option value="dear_first_last">Dear [First] [Last]</option>
+                <option value="hi_first">Hi [First]</option>
+                <option value="to_sal_last">To [Sal] [Last]</option>
+              </select>
+              <input type="text" id="greetingFallback" class="input input-inline"
+                placeholder="Fallback e.g. Dear Valued Customer" style="max-width:160px;" />
+            </div>
+            <p class="hint">Generates "Dear Mr. Smith" from <code>salutation</code>, <code>first_name</code>, <code>last_name</code>, <code>gender</code> columns.</p>
+            <div class="custom-tag-row" style="margin-top:10px;">
+              <input type="text" id="customTagInput" class="input input-inline" placeholder="custom_field_name" />
+              <button class="btn-secondary" id="addCustomTagBtn">+ Add tag</button>
+            </div>
+          </div>
+        </details>
       </div>
 
       <div class="section">
@@ -377,6 +392,27 @@
 
       </div>
 
+      <!-- About -->
+      <div class="section about-section">
+        <div class="about-header">
+          <img src="assets/icon-color.png" alt="Mail Merge icon" class="about-icon" />
+          <div class="about-meta">
+            <div class="about-app-name">Mail Merge</div>
+            <div class="about-version-badge">v2.5.0</div>
+          </div>
+        </div>
+        <p class="about-tagline">Classic Mail Merge Engine for New Outlook</p>
+        <p class="hint" style="margin-top:5px;">All data is processed locally in your browser. Nothing is ever transmitted to our servers.</p>
+        <div class="about-links">
+          <a href="https://leighton-grey.github.io/mail-merge-addin" target="_blank" class="about-link">Website</a>
+          <span class="about-sep">·</span>
+          <a href="https://leighton-grey.github.io/mail-merge-addin/privacy.html" target="_blank" class="about-link">Privacy</a>
+          <span class="about-sep">·</span>
+          <a href="https://leighton-grey.github.io/mail-merge-addin/terms.html" target="_blank" class="about-link">Terms</a>
+        </div>
+        <div class="about-developer">Developed by <strong>Promethean IT</strong></div>
+      </div>
+
     </div><!-- /tab-options -->
 
   </div><!-- /tab-content-wrap -->
@@ -400,7 +436,7 @@
         <option value="0">Row 1 (default)</option>
       </select>
       <button id="testSendBtn" class="btn-secondary">&#128232; Test</button>
-      <button id="previewAllBtn" class="btn-secondary">&#128065; Preview</button>
+      <button id="previewAllBtn" class="btn-preview">&#128065; Preview</button>
       <button id="simulateBtn" class="btn-secondary" title="Run merge without sending — download per-recipient preview as CSV">Simulate</button>
       <button id="saveDraftsBtn" class="btn-secondary">📝 Drafts</button>
       <button id="broadcastBtn" class="btn-secondary">📢 Broadcast</button>
@@ -462,9 +498,10 @@
     </div>
   </div>
 
-  <div class="footer">
-    <p>All data is processed locally in your browser. Your subject line and CSV are saved to your browser's local storage for convenience — nothing is transmitted to or stored on GitHub Pages servers. Emails are dispatched securely via Microsoft Graph API over TLS/HTTPS on behalf of your authenticated Microsoft 365 account.</p>
-  </div>
+  <details class="footer-disclosure">
+    <summary class="footer-disclosure-btn">🔒 Privacy &amp; data</summary>
+    <p class="footer-disclosure-body">All data is processed locally in your browser. Your subject line and CSV are saved to your browser's local storage for convenience — nothing is transmitted to or stored on GitHub Pages servers. Emails are dispatched securely via Microsoft Graph API over TLS/HTTPS on behalf of your authenticated Microsoft 365 account.</p>
+  </details>
 
   <!-- Contacts picker modal -->
   <div id="contactsModal" class="modal-overlay hidden">
