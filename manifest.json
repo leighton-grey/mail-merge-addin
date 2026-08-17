@@ -48,7 +48,7 @@
         "capabilities": [
           {
             "name": "Mailbox",
-            "minVersion": "1.10"
+            "minVersion": "1.5"
           }
         ]
       },
@@ -58,7 +58,7 @@
             "capabilities": [
               {
                 "name": "Mailbox",
-                "minVersion": "1.10"
+                "minVersion": "1.5"
               }
             ]
           },
