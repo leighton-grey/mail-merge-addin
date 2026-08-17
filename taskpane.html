@@ -751,6 +751,23 @@
     </div>
   </div>
 
+  <!-- Edit recipient table modal -->
+  <div id="editTableModal" class="modal-overlay hidden">
+    <div class="modal modal-edit-table" role="dialog" aria-modal="true" aria-labelledby="editTableModalTitle">
+      <div class="edit-table-modal-header">
+        <strong id="editTableModalTitle">Edit recipient table</strong>
+        <button class="btn-icon" id="editTableCloseBtn" title="Close">✕</button>
+      </div>
+      <p class="hint" style="margin:0 0 10px;">Click any cell to edit. Add a temporary column (e.g. Amount, Address) — changes stay in memory only and never modify your original file.</p>
+      <div class="edit-table-toolbar">
+        <input id="newColNameInput" class="input" placeholder="New column name…" style="flex:1;font-size:12px;" />
+        <button class="btn-secondary" id="editTableAddColBtn">+ Add column</button>
+        <button class="btn-primary" id="editTableSaveBtn">✓ Save</button>
+      </div>
+      <div class="edit-table-grid" id="editTableGrid"></div>
+    </div>
+  </div>
+
   <!-- Core engine -->
   <script src="taskpane.js?v=2.6.0" type="text/javascript"></script>
 </body>

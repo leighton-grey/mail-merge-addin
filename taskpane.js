@@ -197,6 +197,8 @@ let greetingConfig = { format: "dear_sal_last", fallback: "Dear Valued Customer"
 let draftsMode = false;
 
 let selectedRowIndices = null; // null = all selected; Set of original parsedRecipients indices when subset
+let editTableHeaders = [];   // working copy of column names during an edit session
+let editTableRows    = [];   // working copy: array of string arrays (one per recipient)
 
 // Contacts Groups tab state
 let groupsData = [];
@@ -491,6 +493,16 @@ Office.onReady((info) => {
       _closeModalWithTrap("checkErrorsModal"); // Feature 15
     });
 
+    // Edit recipient table modal
+    document.getElementById("editTableCloseBtn").addEventListener("click", () => {
+      document.getElementById("editTableModal").classList.add("hidden");
+    });
+    document.getElementById("editTableAddColBtn").addEventListener("click", editTableAddColumn);
+    document.getElementById("editTableSaveBtn").addEventListener("click", saveEditTableChanges);
+    document.getElementById("newColNameInput").addEventListener("keydown", function(e) {
+      if (e.key === "Enter") { e.preventDefault(); editTableAddColumn(); }
+    });
+
     // Insert field at cursor (Feature 4 v1.8)
     document.getElementById("insertFieldBtn").addEventListener("click", handleInsertField);
 
@@ -578,7 +590,8 @@ Office.onReady((info) => {
       if (e.key !== "Escape") return;
       const visibleModals = [
         "fillInModal", "preSendModal", "confirmModal", "dupeSendModal",
-        "checkErrorsModal", "previewModal", "matchFieldsModal", "contactsModal"
+        "checkErrorsModal", "previewModal", "matchFieldsModal", "contactsModal",
+        "editTableModal"
       ];
       for (const id of visibleModals) {
         const el = document.getElementById(id);
@@ -586,6 +599,7 @@ Office.onReady((info) => {
           const cancelBtn = el.querySelector(
             "#fillInCancelBtn, #preSendCancelBtn, #confirmCancelBtn, #dupeSendCancelBtn, " +
             "#checkErrorsCloseBtn, #previewCloseBtn, #matchFieldsCancelBtn, #contactsCloseBtn, " +
+            "#editTableCloseBtn, " +
             "button[class*='cancel'], button[class*='close']"
           );
           if (cancelBtn) cancelBtn.click();
@@ -2509,7 +2523,10 @@ function renderPreviewTable(rows) {
   const pageRows = rows.slice(previewTablePage * PREVIEW_PAGE_SIZE, (previewTablePage + 1) * PREVIEW_PAGE_SIZE);
 
   const headers = Object.keys(rows[0]);
-  let html = '<label class="label">Preview (rows ' + (previewTablePage * PREVIEW_PAGE_SIZE + 1) + '–' + Math.min((previewTablePage + 1) * PREVIEW_PAGE_SIZE, rows.length) + ' of ' + rows.length + ')</label>';
+  let html = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
+    '<label class="label" style="margin:0;">Preview (rows ' + (previewTablePage * PREVIEW_PAGE_SIZE + 1) + '–' + Math.min((previewTablePage + 1) * PREVIEW_PAGE_SIZE, rows.length) + ' of ' + rows.length + ')</label>' +
+    '<button class="btn-secondary btn-edit-table" id="openEditTableBtn">✏ Edit table</button>' +
+    '</div>';
   html += '<table class="preview-table"><thead><tr>';
   html += '<th><input type="checkbox" id="selectAllRowsChk" checked title="Select/deselect all" /></th>';
   headers.forEach(h => { html += '<th>' + escapeHtml(h) + '</th>'; });
@@ -2550,6 +2567,10 @@ function renderPreviewTable(rows) {
       renderPreviewTable(rows);
     });
   }
+
+  // Wire "Edit table" button — opens the in-memory edit modal
+  const openEditBtn = document.getElementById("openEditTableBtn");
+  if (openEditBtn) openEditBtn.addEventListener("click", openEditTableModal);
 
   // Wire up header checkbox
   document.getElementById("selectAllRowsChk").addEventListener("change", function(e) {
@@ -5294,4 +5315,161 @@ async function handleCheckErrors() {
 
   document.getElementById("checkErrorsBody").innerHTML = lines.join("");
   _openModalWithTrap("checkErrorsModal"); // Feature 15: focus trap
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   EDIT RECIPIENT TABLE — in-memory CSV editor
+   Lets users add/rename/delete columns and edit cell values without
+   leaving the add-in or modifying the original file.
+   ═══════════════════════════════════════════════════════════════════ */
+
+function openEditTableModal() {
+  if (!parsedRecipients.length) {
+    log("Load a recipient list first before editing.", "error");
+    return;
+  }
+  editTableHeaders = Object.keys(parsedRecipients[0]).filter(k => k !== "_originalIndex");
+  editTableRows = parsedRecipients.map(row =>
+    editTableHeaders.map(h => row[h] !== undefined ? String(row[h]) : "")
+  );
+  const newColInput = document.getElementById("newColNameInput");
+  if (newColInput) newColInput.value = "";
+  renderEditTable();
+  document.getElementById("editTableModal").classList.remove("hidden");
+  const firstCell = document.querySelector("#editTableGrid .edit-cell-input");
+  if (firstCell) firstCell.focus();
+}
+
+function renderEditTable() {
+  const grid = document.getElementById("editTableGrid");
+  let html = '<table><thead><tr>';
+  html += '<th style="width:28px;min-width:28px;"></th>';
+  editTableHeaders.forEach(function(h, colIdx) {
+    html +=
+      '<th>' +
+        '<div class="edit-col-header-wrap">' +
+          '<input class="edit-col-header-input" data-col="' + colIdx + '" value="' + escapeHtml(h) + '" title="Rename column" />' +
+          '<button class="edit-col-del" data-col="' + colIdx + '" title="Remove column">✕</button>' +
+        '</div>' +
+      '</th>';
+  });
+  html += '</tr></thead><tbody>';
+  editTableRows.forEach(function(row, rowIdx) {
+    html += '<tr>';
+    html += '<td class="edit-row-num">' + (rowIdx + 1) + '</td>';
+    row.forEach(function(val, colIdx) {
+      html +=
+        '<td><input class="edit-cell-input"' +
+          ' data-row="' + rowIdx + '"' +
+          ' data-col="' + colIdx + '"' +
+          ' value="' + escapeHtml(val) + '"' +
+          ' /></td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  grid.innerHTML = html;
+
+  grid.querySelectorAll(".edit-col-header-input").forEach(function(input) {
+    input.addEventListener("change", function() {
+      const col = parseInt(this.dataset.col, 10);
+      const trimmed = this.value.trim();
+      editTableHeaders[col] = trimmed || editTableHeaders[col];
+      this.value = editTableHeaders[col];
+    });
+  });
+
+  grid.querySelectorAll(".edit-col-del").forEach(function(btn) {
+    btn.addEventListener("click", function() {
+      const col = parseInt(this.dataset.col, 10);
+      if (editTableHeaders.length <= 1) { log("Cannot remove the last column.", "error"); return; }
+      flushEditTableInputs();
+      editTableHeaders.splice(col, 1);
+      editTableRows.forEach(function(row) { row.splice(col, 1); });
+      renderEditTable();
+    });
+  });
+
+  grid.querySelectorAll(".edit-cell-input").forEach(function(input) {
+    input.addEventListener("input", function() {
+      editTableRows[parseInt(this.dataset.row, 10)][parseInt(this.dataset.col, 10)] = this.value;
+    });
+  });
+}
+
+function flushEditTableInputs() {
+  const grid = document.getElementById("editTableGrid");
+  grid.querySelectorAll(".edit-col-header-input").forEach(function(input) {
+    const col = parseInt(input.dataset.col, 10);
+    const trimmed = input.value.trim();
+    if (trimmed) editTableHeaders[col] = trimmed;
+  });
+  grid.querySelectorAll(".edit-cell-input").forEach(function(input) {
+    editTableRows[parseInt(input.dataset.row, 10)][parseInt(input.dataset.col, 10)] = input.value;
+  });
+}
+
+function editTableAddColumn() {
+  const input = document.getElementById("newColNameInput");
+  const name  = (input ? input.value.trim() : "");
+  if (!name) {
+    log("Enter a column name in the box next to '+ Add column'.", "warning");
+    if (input) input.focus();
+    return;
+  }
+  if (editTableHeaders.map(h => h.toLowerCase()).includes(name.toLowerCase())) {
+    log('A column named "' + escapeHtml(name) + '" already exists.', "warning");
+    if (input) input.focus();
+    return;
+  }
+  flushEditTableInputs();
+  editTableHeaders.push(name);
+  editTableRows.forEach(function(row) { row.push(""); });
+  if (input) input.value = "";
+  renderEditTable();
+  const grid = document.getElementById("editTableGrid");
+  grid.scrollLeft = grid.scrollWidth;
+  const newCells = grid.querySelectorAll(".edit-cell-input[data-col='" + (editTableHeaders.length - 1) + "']");
+  if (newCells.length) newCells[0].focus();
+}
+
+function saveEditTableChanges() {
+  flushEditTableInputs();
+  parsedRecipients = editTableRows.map(function(row, i) {
+    const obj = { _originalIndex: i };
+    editTableHeaders.forEach(function(h, col) {
+      obj[h] = row[col] !== undefined ? row[col] : "";
+    });
+    return obj;
+  });
+  document.getElementById("editTableModal").classList.add("hidden");
+  refreshAfterTableEdit();
+}
+
+function refreshAfterTableEdit() {
+  const headers = editTableHeaders.slice();
+  document.getElementById("recipientCount").textContent =
+    parsedRecipients.length + ' recipient' + (parsedRecipients.length !== 1 ? 's' : '') + ' loaded';
+  const testRowSel = document.getElementById("testRowSelect");
+  if (testRowSel) {
+    testRowSel.innerHTML = parsedRecipients.map(function(r, i) {
+      const label = escapeHtml((r.email || r.first_name || "").slice(0, 28));
+      return '<option value="' + i + '">Row ' + (i + 1) + ': ' + label + '</option>';
+    }).join("");
+  }
+  headers.forEach(function(h) {
+    const tag = '{{' + h + '}}';
+    if (!DEFAULT_TAGS.includes(tag)) addTagToBar(tag);
+  });
+  populateFilterSortBar(headers);
+  populateInsertFieldSelect(headers);
+  activeFilter       = null;
+  previewTablePage   = 0;
+  selectedRowIndices = null;
+  renderPreviewTable(parsedRecipients);
+  log(
+    'Table saved — ' + parsedRecipients.length + ' row' + (parsedRecipients.length !== 1 ? 's' : '') +
+    ', ' + headers.length + ' column' + (headers.length !== 1 ? 's' : '') + '.',
+    'success'
+  );
 }
