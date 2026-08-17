@@ -37,13 +37,13 @@
 
   <!-- SheetJS — Excel/XLSX parsing ────────────────────────────────
        Allows users to upload .xlsx files as their recipient list in
-       addition to plain CSV. Loaded from cdnjs with an SRI hash so
-       the browser refuses a tampered version of the library.
+       addition to plain CSV. Loaded from cdnjs without SRI/crossorigin
+       so that cached or proxied responses (which may lack CORS headers)
+       don't cause the browser to reject the script. The page CSP already
+       restricts scripts to the cdnjs.cloudflare.com origin only.
        ─────────────────────────────────────────────────────────── -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"
-          type="text/javascript"
-          integrity="sha384-OLBgp1GsljhM2TJ+sbHjaiH9txEUvgdDTAzHv2P24donTt6/529l+9Ua0vFImLlb"
-          crossorigin="anonymous"></script>
+          type="text/javascript"></script>
 
   <!-- App styles — cache-busted with ?v=2.6.0 so browsers pick up
        new CSS after a version update.                              -->
@@ -96,10 +96,11 @@
 
       <!-- Recipients source switcher -->
       <div class="section" style="padding-bottom:6px;">
+        <label class="label" style="margin-bottom:6px;">Add recipients another way</label>
         <div class="csv-upload-row" style="flex-wrap:wrap;gap:6px;">
-          <button class="btn-secondary" id="quickModeBtn">📧 Quick: type emails</button>
-          <button class="btn-secondary" id="syncRecipientsBtn" title="Import addresses from Outlook's To field into the recipient list">📥 Import from To field</button>
-          <button class="btn-secondary" id="importContactsBtn">👤 From Contacts</button>
+          <button class="btn-secondary" id="quickModeBtn" title="Type or paste email addresses directly — no spreadsheet needed">📧 Type emails</button>
+          <button class="btn-secondary" id="syncRecipientsBtn" title="Pull in the addresses already in Outlook's To field">📥 From To field</button>
+          <button class="btn-secondary" id="importContactsBtn" title="Pick recipients from your Outlook contacts">👤 From Contacts</button>
           <span id="recipientCount" class="count-badge" style="margin-left:auto;"></span>
         </div>
       </div>
@@ -114,10 +115,11 @@
 
       <!-- CSV section -->
       <div id="csvSection" class="section">
+        <label class="label">Recipient list <span class="hint-inline">(CSV or Excel)</span></label>
+        <p class="hint" style="margin-bottom:8px;">Upload a spreadsheet of recipients, or paste data below. Each row becomes one email. <a id="downloadSampleCsv" href="#" style="color:var(--accent,#534AB7);text-decoration:none;white-space:nowrap;" title="Download a ready-to-fill sample CSV with all supported columns">&#11015; Download sample file</a> to see the expected format.</p>
         <div class="csv-upload-row">
-          <button class="btn-secondary" id="uploadCsvBtn">📂 Load file</button>
+          <button class="btn-secondary" id="uploadCsvBtn" title="Load a .csv or .xlsx spreadsheet of recipients">📂 Load CSV / Excel</button>
           <input type="file" id="csvFileInput" accept=".csv,.xlsx,.xls,text/csv" class="hidden" />
-          <a id="downloadSampleCsv" href="#" style="font-size:11px;color:var(--accent,#534AB7);text-decoration:none;margin-left:4px;" title="Download a sample CSV file">&#11015; Sample</a>
         </div>
         <!-- Drag-and-drop zone wraps the textarea -->
         <div id="csvDropZone" class="csv-drop-zone">
@@ -128,7 +130,7 @@
         <div class="csv-actions">
           <button class="btn-secondary" id="previewBtn">Preview</button>
           <button class="btn-secondary" id="mapFieldsBtn" style="display:none;">⇄ Map fields</button>
-          <span class="hint" style="flex:1;margin:0;font-size:10px">Headers required: <code>email</code>. Optional: <code>cc</code> <code>bcc</code> <code>attachment</code> <code>display_name</code> <code>first_name</code> <code>last_name</code> <code>skip_if</code> <code>send_at</code>. Auto-detects comma, semicolon, tab, or pasted Excel tables.</span>
+          <span class="hint" style="flex:1;margin:0;font-size:10px">Required column: <code>email</code>. Optional: <code>cc</code> <code>bcc</code> <code>display_name</code> <code>first_name</code> <code>last_name</code> <code>attachment</code> <code>skip_if</code> <code>send_at</code>. Comma, semicolon, tab, or pasted Excel all work.</span>
         </div>
       </div>
 
@@ -164,7 +166,7 @@
           <span id="suppressionLabel" class="attachment-label">None loaded</span>
           <button class="btn-icon hidden" id="clearSuppressionBtn" title="Clear suppression list">✕</button>
         </div>
-        <p class="hint">Addresses in this list will be silently skipped.</p>
+        <p class="hint">Upload a .csv or .txt file with one email address per line. Any address in this list will be silently skipped during the merge.</p>
       </div>
 
       <!-- Attachments -->
@@ -306,6 +308,7 @@
       <div class="section">
         <label class="label">Reply-To <span class="hint-inline">(optional)</span></label>
         <input type="email" id="replyToInput" class="input" placeholder="replies@company.com" />
+        <p class="hint">When set, recipient replies go here instead of your mailbox — useful for shared inboxes.</p>
       </div>
 
       <div class="section">
@@ -320,8 +323,7 @@
           <button class="btn-secondary" id="saveBodyToTemplateBtn">📋 Save body to template</button>
           <button class="btn-secondary" id="loadBodyFromTemplateBtn">📋 Load body from template</button>
         </div>
-        <p class="hint">Saves subject, reply-to, all send options, and settings. Load a template to restore everything.</p>
-        <p class="hint">Saves/restores the email body in the current compose window alongside settings.</p>
+        <p class="hint">Templates save everything: subject, body, reply-to, and all send options. Load a template to restore your full setup in one click.</p>
       </div>
 
     </div><!-- /tab-compose -->
@@ -334,22 +336,21 @@
           <label class="toggle-label">
             <input type="checkbox" id="groupByEmail"> Group rows by email (many-to-one merge)
           </label>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
-            Rows sharing the same email address are merged into one email. Use <code>{{merge_table}}</code> in your template to insert a table of all rows.
-          </div>
+          <p class="hint" style="margin-top:4px;">Rows sharing the same email address are combined into one email. Use <code>{{merge_table}}</code> in the body to insert a table of all their rows.</p>
         </div>
       </div>
 
       <div class="section">
         <!-- 2-column checkbox grid -->
+        <label class="label" style="margin-bottom:8px;">Per-send settings</label>
         <div class="opts-grid">
           <label class="checkbox-label"><input type="checkbox" id="saveToSentItems" checked />Save to Sent</label>
-          <label class="checkbox-label"><input type="checkbox" id="deduplicateEnabled" />Dedup</label>
+          <label class="checkbox-label"><input type="checkbox" id="deduplicateEnabled" />Skip duplicates</label>
           <label class="checkbox-label"><input type="checkbox" id="requestReadReceipt" />Read receipt</label>
           <label class="checkbox-label"><input type="checkbox" id="requestDeliveryReceipt" />Delivery receipt</label>
-          <label class="checkbox-label"><input type="checkbox" id="bccSelfEnabled" />BCC self</label>
+          <label class="checkbox-label"><input type="checkbox" id="bccSelfEnabled" />BCC myself</label>
           <label class="checkbox-label"><input type="checkbox" id="flagForFollowup" />Flag follow-up</label>
-          <label class="checkbox-label"><input type="checkbox" id="plainTextMode" />Plain text</label>
+          <label class="checkbox-label"><input type="checkbox" id="plainTextMode" />Plain text only</label>
         </div>
 
         <div class="importance-row" style="margin-top:8px;">
@@ -397,10 +398,12 @@
                 <input type="checkbox" id="sendingWindowEnabled"> Restrict sends to business hours
               </label>
             </div>
-            <div id="sendingWindowRow" class="schedule-row hidden" style="margin-top:4px;">
-              <label>Window start: <input type="time" id="windowStart" value="09:00"></label>
-              <label style="margin-left:10px;">Window end: <input type="time" id="windowEnd" value="17:00"></label>
-              <div style="margin-top:4px;font-size:11px;color:var(--text-muted)">Sends outside this window will pause until the window opens (Mon–Fri only).</div>
+            <div id="sendingWindowRow" class="schedule-row hidden" style="margin-top:6px;">
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px;">
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Start <input type="time" id="windowStart" value="09:00"></label>
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;">End <input type="time" id="windowEnd" value="17:00"></label>
+              </div>
+              <p class="hint">Sends outside this window pause until the window reopens (Mon–Fri only).</p>
             </div>
           </div>
         </div>
@@ -443,26 +446,32 @@
                  The JS event listener reads .value as parseFloat() so it works
                  identically with either input type — no JS changes required.
                  width:70px keeps the number field compact next to the label. -->
-            <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;">
               <label class="label" style="margin:0;">Batch delay</label>
               <input type="number" id="batchDelayInput" min="0" max="10" step="0.5" value="1.5"
-                class="input" style="width:70px;padding:4px 8px;font-size:12px;" />
-              <span id="batchDelayLabel" class="hint-inline">seconds between batches</span>
-            </div>
-
-            <div class="opts-row" style="margin-top:6px;">
-              <label>Send delay jitter:
-                <input type="number" id="jitterMinInput" min="0" max="60" value="0" style="width:45px"> –
-                <input type="number" id="jitterMaxInput" min="0" max="60" value="0" style="width:45px"> sec
-              </label>
-              <div style="font-size:11px;color:var(--text-muted)">Random extra delay added per email (0 = off)</div>
+                style="width:70px;" />
+              <span id="batchDelayLabel" class="hint-inline">sec between sends — slows the merge to avoid throttling</span>
             </div>
 
             <div class="opts-row" style="margin-top:8px;">
-              <label>Max emails/hour: <input type="number" id="maxPerHour" min="0" max="500" value="0" style="width:60px"> <span style="font-size:11px;color:var(--text-muted)">(0 = unlimited)</span></label>
+              <label class="label" style="margin-bottom:4px;">Send delay jitter <span class="hint-inline">(randomise timing)</span></label>
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                <input type="number" id="jitterMinInput" min="0" max="60" value="0" style="width:52px;">
+                <span class="hint-inline">–</span>
+                <input type="number" id="jitterMaxInput" min="0" max="60" value="0" style="width:52px;">
+                <span class="hint-inline">sec &nbsp;(0 = off)</span>
+              </div>
             </div>
-            <div class="opts-row" style="margin-top:4px;">
-              <label>Daily cap: <input type="number" id="dailyCap" min="0" max="10000" value="0" style="width:60px"> <span style="font-size:11px;color:var(--text-muted)">(0 = unlimited)</span></label>
+
+            <div class="opts-row" style="margin-top:8px;">
+              <label class="label" style="margin-bottom:4px;">Rate limits</label>
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <span class="hint-inline">Max/hour:</span>
+                <input type="number" id="maxPerHour" min="0" max="500" value="0" style="width:60px;">
+                <span class="hint-inline">Daily cap:</span>
+                <input type="number" id="dailyCap" min="0" max="10000" value="0" style="width:65px;">
+                <span class="hint-inline">(0 = unlimited)</span>
+              </div>
             </div>
 
           </div>
@@ -478,11 +487,11 @@
             <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">
               Email addresses on this list are permanently skipped in all merges.
             </div>
-            <div style="display:flex;gap:6px;margin-bottom:6px;">
-              <input type="email" id="optoutAddInput" placeholder="email@example.com" style="flex:1">
+            <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;">
+              <input type="email" id="optoutAddInput" placeholder="email@example.com" style="flex:1;">
               <button id="optoutAddBtn" class="btn-secondary">Add</button>
             </div>
-            <div id="optoutList" style="max-height:120px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;padding:4px;font-size:12px;margin-bottom:6px;"></div>
+            <div id="optoutList" class="optout-list-box"></div>
             <div style="display:flex;gap:6px;">
               <button id="optoutImportBtn" class="btn-secondary">Import from CSV column</button>
               <button id="optoutClearBtn" class="btn-secondary btn-danger">Clear all</button>

@@ -45,7 +45,7 @@
      muted (hint, placeholder, timestamp) content.             */
   --text:          #1F1D3A;   /* near-black — primary body text */
   --text-secondary:#5A5880;   /* medium grey-purple — labels, captions */
-  --text-muted:    #908DB8;   /* light purple — hints, placeholders */
+  --text-muted:    #7B78AA;   /* medium purple — hints, placeholders (AA-safe on white) */
   --border:        #E0DDEF;   /* standard divider / input border colour */
   --border-light:  #ECEAFF;   /* extra-light border for nested containers */
 
@@ -97,6 +97,7 @@
    ─────────────────────────────────────────────────────────── */
 html {
   overscroll-behavior-x: none;
+  overflow-x: hidden;  /* prevent horizontal scroll at root */
 }
 
 /* Make both html and body fill the full viewport height so the
@@ -117,6 +118,8 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 100%;
+  width: 100%;            /* never exceed the viewport width */
+  overflow-x: hidden;     /* clip any child that bleeds past the pane edge */
   -webkit-font-smoothing: antialiased;  /* crisper text on Retina/HiDPI screens */
   /* Block horizontal overscroll at body level too (belt-and-suspenders
      alongside the same rule on html — needed in some Chrome versions) */
@@ -223,12 +226,17 @@ body {
    when the content is taller than the available height.
    ─────────────────────────────────────────────────────────────── */
 .tab-content-wrap {
-  flex: 1;          /* grow to fill the flex-column body, pushing footer down */
-  overflow-y: auto; /* scroll when content overflows the viewport height */
+  flex: 1;           /* grow to fill the flex-column body, pushing footer down */
+  overflow-y: auto;  /* scroll when content overflows the viewport height */
+  overflow-x: hidden; /* never allow horizontal scroll inside the content area */
+  min-width: 0;      /* allow flex child to shrink below its natural width */
 }
 
 /* Each individual tab panel; padding creates breathing room around
-   the stacked section cards inside each tab.                        */
+   the stacked section cards inside each tab.
+   Do NOT add overflow-x here — CSS forces overflow-y to auto at the
+   same time, making .tab-pane its own scroll container and breaking
+   the outer .tab-content-wrap scroll. Overflow is handled upstream. */
 .tab-pane { padding: 12px 0 14px; }
 
 /* ─── Section Cards ───────────────────────────────────────────────
@@ -245,6 +253,8 @@ body {
   padding: 14px 16px;
   margin: 0 10px 10px;  /* 10px horizontal gutter, 10px gap between stacked sections */
   box-shadow: var(--shadow-sm);
+  overflow: hidden;     /* clip any child that would bleed outside the card */
+  min-width: 0;         /* allow section to shrink below its content's natural width */
 }
 
 /* ─── Typography helpers ──────────────────────────────────────────
@@ -271,14 +281,14 @@ body {
 }
 
 .hint {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-muted);
   margin-top: 5px;
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
 .hint-inline {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-muted);  /* used for things like "(1.5 s between batches)" next to a label */
 }
 
@@ -615,6 +625,13 @@ body {
    border-collapse removes the double-border that appears when
    adjacent td elements each have their own border.
    ─────────────────────────────────────────────────────────────── */
+
+/* Allow the preview-table section to scroll horizontally on its own
+   so a wide CSV doesn't push the whole pane sideways.              */
+#previewTable {
+  overflow-x: auto;   /* table scrolls within the card, not the whole pane */
+}
+
 .preview-table {
   width: 100%;
   border-collapse: collapse;
@@ -700,7 +717,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 700;
   color: var(--text);
   pointer-events: none;
@@ -838,7 +855,7 @@ body {
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text);
   cursor: pointer;
   user-select: none;  /* prevent accidental text selection on click */
@@ -847,6 +864,7 @@ body {
 .checkbox-label input[type="checkbox"] {
   width: 15px;
   height: 15px;
+  flex-shrink: 0;
   cursor: pointer;
   accent-color: var(--accent);  /* tints the checkbox tick in the brand accent colour */
 }
@@ -912,7 +930,7 @@ body {
 .accordion-hdr.open .accordion-chevron { transform: rotate(90deg); }
 
 .accordion-body {
-  padding: 12px 16px;
+  padding: 14px 16px;
   background: var(--surface);
   border-top: 1px solid var(--border);
 }
@@ -925,11 +943,11 @@ body {
 .opts-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;  /* equal two-column layout */
-  gap: 7px 12px;                    /* row-gap / column-gap */
+  gap: 9px 12px;                    /* row-gap / column-gap — extra vertical room */
 }
 
-.opts-grid .checkbox-label { font-size: 11.5px; }  /* slightly smaller in the dense grid */
-.opts-row { margin-bottom: 4px; }  /* adds a bit of vertical breathing room */
+.opts-grid .checkbox-label { font-size: 12px; }  /* slightly smaller in the dense grid */
+.opts-row { margin-bottom: 6px; }  /* adds a bit of vertical breathing room */
 
 /* ─── Sending Window / Rate Limit ────────────────────────────────
    Inline flex rows for the "sending window" time pickers and the
@@ -1116,8 +1134,8 @@ body {
 .footer-log-mini {
   flex: 1;
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;  /* code-like for log output */
-  font-size: 10px;
-  color: #9D9BB8;           /* muted purple-grey — readable on dark background */
+  font-size: 10.5px;
+  color: #B0AECB;           /* lighter purple-grey for better readability on dark background */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;  /* clip long messages with … */
@@ -1182,7 +1200,7 @@ details[open] .footer-disclosure-btn::after {
 .footer-disclosure-body {
   margin-top: 6px;
   padding: 10px 14px;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-muted);
   line-height: 1.65;
   text-align: center;
@@ -1197,7 +1215,7 @@ code {
   padding: 1px 6px;
   border-radius: 6px;
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--accent);
   border: 1px solid var(--accent-border);
 }
@@ -1208,6 +1226,19 @@ code {
 /* ─── Opt-out list ───────────────────────────────────────────── */
 #optoutList { font-size: 12px; }
 #optoutList div:hover { background: var(--accent-bg); }
+
+/* Scrollable box holding the opt-out email address list */
+.optout-list-box {
+  max-height: 120px;
+  overflow-y: auto;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 12px;
+  margin-bottom: 8px;
+  background: var(--surface-raised);
+  line-height: 1.7;
+}
 
 /* ─── Fill-in modal fields ───────────────────────────────────── */
 #fillInFields input { font-size: 13px; }
@@ -1257,8 +1288,8 @@ code {
 }
 
 .tag-target-btn {
-  padding: 2px 9px;
-  font-size: 10px;
+  padding: 3px 10px;
+  font-size: 11px;
   font-weight: 600;
   font-family: inherit;
   background: none;
@@ -1359,9 +1390,9 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
   background: var(--bg);
   border: 1px solid var(--border-light);
   border-radius: var(--radius-sm);
-  font-size: 11px;
-  color: var(--text-muted);
-  line-height: 1.8;
+  font-size: 11.5px;
+  color: var(--text-secondary);  /* slightly stronger than muted for code-heavy content */
+  line-height: 1.9;
 }
 
 /* ─── About Section ──────────────────────────────────────────── */
@@ -1463,6 +1494,68 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
    ─────────────────────────────────────────────────────────────── */
 .hidden { display: none !important; }
 
+/* ─── Bare inputs in accordion panels (Advanced, Scheduling) ─────
+   These number/time/email inputs don't carry the .input class but
+   need consistent sizing and focus rings to match the design system. */
+#batchDelayInput,
+#jitterMinInput,
+#jitterMaxInput,
+#maxPerHour,
+#dailyCap {
+  padding: 4px 8px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--surface-raised);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+#batchDelayInput:focus,
+#jitterMinInput:focus,
+#jitterMaxInput:focus,
+#maxPerHour:focus,
+#dailyCap:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(91,82,200,0.13);
+}
+
+#windowStart,
+#windowEnd {
+  padding: 4px 6px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--surface-raised);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+#windowStart:focus,
+#windowEnd:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(91,82,200,0.13);
+}
+
+#optoutAddInput {
+  width: 100%;
+  padding: 7px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--surface-raised);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+#optoutAddInput:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(91,82,200,0.13);
+}
+
 /* ─── Drag-and-drop CSV zone ──────────────────────────────────────
    The .csv-drop-zone wraps the CSV textarea and uses a position:
    absolute overlay (.csv-drop-hint) to display a dashed "Drop CSV
@@ -1509,6 +1602,7 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
 .footer-step1-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;      /* wrap to next line when pane is too narrow */
   gap: 6px;
   background: linear-gradient(135deg, rgba(245,130,32,0.08) 0%, rgba(245,130,32,0.03) 100%);
   border: 1px solid rgba(245,130,32,0.25);
@@ -1519,13 +1613,13 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
 
 /* "STEP 1" uppercase label — visually styled like a badge */
 .step1-label {
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 700;
   color: var(--brand-orange-dark);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   white-space: nowrap;
-  flex-shrink: 0;  /* don't let the label compress under flex pressure */
+  /* flex-shrink: 0 removed — allows label to participate in wrapping on narrow panes */
 }
 
 /* Compact <select> for choosing which recipient to test-send to */
