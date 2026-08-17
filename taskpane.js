@@ -1,7 +1,23 @@
-/* Mail Merge Engine v2.5.0
+/* Mail Merge Engine v2.6.0
  * Auth: Office.js SSO -> Microsoft Graph API
  * Batching: 20 requests per Graph $batch call (reduced dynamically when attachment present)
  * Privacy: Subject + CSV cached in browser localStorage only. Nothing stored server-side.
+ *
+ * v2.6.0 — 7 UX features for non-technical users:
+ *   1. Quick email entry mode — toggle replaces CSV area with a simple one-per-line email textarea;
+ *      add-in converts to internal CSV invisibly, shows recipient count in real time
+ *   2. Import from Outlook To field — button reads native compose To addresses into the recipient
+ *      list and clears Outlook's To field so the merge engine can populate it per-recipient
+ *   3. Smart paste detection — paste handler detects tab-separated content (copied from Excel /
+ *      Google Sheets) and auto-converts tabs→commas before inserting into CSV textarea
+ *   4. Drag-and-drop CSV/Excel files — drop zone overlay on the CSV textarea; dropped files are
+ *      processed identically to the file picker (supports .csv, .xlsx, .xls)
+ *   5. Prominent Step 1 test row — "Send test to myself" extracted from action buttons into its
+ *      own visually distinct row (brand orange pill, "Step 1 — Test first" label) above the footer
+ *   6. Plain-English pre-send summary — confirmation modal now shows a human-readable card:
+ *      recipient count, estimated time, and first email preview (To address + personalised subject)
+ *   7. accentColor updated to brand orange #F58220 in manifest; manifest icons changed from
+ *      external URLs to bundled PNGs inside the zip to fix M365 Admin Center upload validation
  *
  * v2.4.0 — 6 bug fixes (merge complete timer guard, cancel vs done, bare localStorage,
  *   failedRecipients cleared on reload, mergeInProgress user message, broadcast re-entrancy);
@@ -141,7 +157,30 @@ let previewTablePage          = 0;      // Feature 6: preview table paging
 const PREVIEW_PAGE_SIZE       = 10;     // Feature 6: rows per page
 let parsedRecipients          = [];
 let cancelRequested           = false;
-let subjectHasFocus           = false;
+let subjectHasFocus           = false;  // true while #subjectInput has keyboard focus
+
+// _subjectWasFocused: snapshot of subjectHasFocus captured on mousedown of a tag chip.
+// This is necessary because blur fires BEFORE click in the browser event order —
+// by the time the click handler runs, subjectHasFocus is already false. We snapshot it
+// during mousedown (which fires before blur) so insertTag() knows whether to target
+// the subject line or the email body.
+let _subjectWasFocused        = false;
+
+// _hintResetTimer: debounce handle for resetting the #tagsHint text after
+// the subject input loses focus. The 150 ms delay covers the mousedown→blur→click
+// sequence, so the hint doesn't flip to "body" before the click completes.
+let _hintResetTimer           = null;
+
+// tagTarget: controls where clicking a tag chip inserts the token.
+//   "body"    → setSelectedDataAsync (cursor position in Outlook compose body)
+//   "subject" → subject.getAsync + setAsync (appends to Outlook native subject)
+// Toggled by the Body / Subject segmented control in the tag header.
+// Note: when #subjectInput itself is focused, insertTag() always writes
+// into that field regardless of tagTarget (subjectHasFocus takes priority).
+let tagTarget                 = "body";
+let _lastOutlookSubject       = null;   // last value read from / pushed to Outlook's native subject
+let _subjectPushTimer         = null;   // debounce timer for pushing to Outlook
+let _subjectPollTimer         = null;   // interval for polling Outlook subject
 let sharedAttachments         = [];   // array of { name, contentType, contentBytes, sizeBytes }
 let perRecipientFiles         = new Map();
 let inlineImages              = new Map(); // filename.toLowerCase() → { name, contentType, contentBytes, sizeBytes }
@@ -287,12 +326,69 @@ Office.onReady((info) => {
     });
 
     const subjectInput = document.getElementById("subjectInput");
-    subjectInput.addEventListener("focus", () => { subjectHasFocus = true; });
-    subjectInput.addEventListener("blur",  () => { subjectHasFocus = false; });
+    // On focus: mark that subject has focus AND immediately update the tag hint
+    // text so users know clicking a tag will target the subject line.
+    subjectInput.addEventListener("focus", () => {
+      subjectHasFocus = true;
+      clearTimeout(_hintResetTimer);  // cancel any pending reset from a previous blur
+      updateTagHint(true);
+    });
+    // On blur: mark focus as lost, then reset the hint after 150 ms.
+    // The 150 ms delay is intentional — it covers the full mousedown→blur→click
+    // sequence. If the user clicked a tag chip, the click fires within ~50-80 ms
+    // of blur, so the hint (and the snapshot in _subjectWasFocused) are still
+    // correct when insertTag() runs.
+    subjectInput.addEventListener("blur", () => {
+      subjectHasFocus = false;
+      _hintResetTimer = setTimeout(() => updateTagHint(false), 150);
+    });
 
+    // Cross-frame focus fix: when the user clicks in the Outlook compose body
+    // (a different iframe), the subjectInput blur event does NOT fire — cross-frame
+    // clicks are invisible to the source frame's blur listeners. However, the
+    // taskpane's *window* does lose focus, and window.blur fires reliably.
+    // Without this listener, subjectHasFocus would stay true permanently after
+    // any subject interaction, routing every subsequent tag click to the subject
+    // path instead of setSelectedDataAsync → Outlook body.
+    window.addEventListener("blur", () => {
+      if (subjectHasFocus) {
+        subjectHasFocus = false;
+        clearTimeout(_hintResetTimer);
+        updateTagHint(false);
+      }
+    });
+
+    // mousedown on tagBar: snapshot whether subject had focus BEFORE blur fires.
+    // We check e.target to make sure the user isn't clicking the ✕ remove button —
+    // that click should never trigger an insert.
+    document.getElementById("tagBar").addEventListener("mousedown", (e) => {
+      if (!e.target.classList.contains("tag-remove-btn")) {
+        _subjectWasFocused = subjectHasFocus;
+      }
+    });
+
+    // click on tagBar: use closest() so clicking the inner .tag-label span
+    // (or anywhere in the chip) still finds the parent [data-tag] element.
+    // Skip the click entirely if the remove button was clicked.
     document.getElementById("tagBar").addEventListener("click", (e) => {
-      const tag = e.target.dataset.tag;
-      if (tag) insertTag(tag);
+      if (e.target.classList.contains("tag-remove-btn")) return; // handled by its own listener
+      const chip = e.target.closest("[data-tag]");
+      if (chip) insertTag(chip.dataset.tag, _subjectWasFocused);
+    });
+
+    // Body / Subject toggle — updates tagTarget and flips the active pill.
+    // When "Subject" is active, insertTag() uses subject.getAsync + setAsync
+    // to append the token to the native Outlook subject line instead of
+    // inserting into the compose body via setSelectedDataAsync.
+    document.getElementById("targetBodyBtn").addEventListener("click", () => {
+      tagTarget = "body";
+      document.getElementById("targetBodyBtn").classList.add("active");
+      document.getElementById("targetSubjectBtn").classList.remove("active");
+    });
+    document.getElementById("targetSubjectBtn").addEventListener("click", () => {
+      tagTarget = "subject";
+      document.getElementById("targetSubjectBtn").classList.add("active");
+      document.getElementById("targetBodyBtn").classList.remove("active");
     });
 
     document.getElementById("customTagInput").addEventListener("keydown", (e) => {
@@ -300,8 +396,18 @@ Office.onReady((info) => {
     });
 
     document.getElementById("subjectInput").addEventListener("input", () => {
-      lsSet(LS_KEY_SUBJECT, document.getElementById("subjectInput").value);
+      const val = document.getElementById("subjectInput").value;
+      lsSet(LS_KEY_SUBJECT, val);
+      // Push to Outlook's native subject field (debounced 400 ms)
+      clearTimeout(_subjectPushTimer);
+      _subjectPushTimer = setTimeout(() => pushSubjectToOutlook(val), 400);
     });
+
+    // Sync button: pull current Outlook subject into taskpane on demand
+    const syncSubjectBtn = document.getElementById("syncSubjectBtn");
+    if (syncSubjectBtn) {
+      syncSubjectBtn.addEventListener("click", () => syncSubjectFromOutlook(true));
+    }
 
     const _csvInputEl = document.getElementById("csvInput");
     const _saveCsv = () => lsSet(LS_KEY_CSV, _csvInputEl.value);
@@ -309,6 +415,12 @@ Office.onReady((info) => {
     _csvInputEl.addEventListener("change", _saveCsv);
 
     restoreLocalState();
+
+    // Sync subject from Outlook's native compose field on first load,
+    // then poll every 500 ms for live-like bidirectional sync between
+    // Outlook's compose field and the taskpane subject input.
+    syncSubjectFromOutlook(true);
+    _subjectPollTimer = setInterval(() => syncSubjectFromOutlook(false), 500);
 
     initTabs();
     initAccordions();
@@ -491,6 +603,70 @@ Office.onReady((info) => {
       }
     });
 
+    // ── Smart paste detection ──────────────────────────────────────
+    // When a user pastes tab-separated content (Excel/Sheets copy),
+    // automatically convert it to CSV so they don't need to save as .csv first.
+    document.getElementById("csvInput")?.addEventListener("paste", (e) => {
+      const raw = (e.clipboardData || window.clipboardData)?.getData("text");
+      if (!raw) return;
+      const lines = raw.split(/\r?\n/);
+      // Tab-separated if the majority of lines contain tabs
+      const tabLines = lines.filter(l => l.includes("\t")).length;
+      if (tabLines < Math.max(1, lines.length * 0.5)) return; // not tab-separated
+      e.preventDefault();
+      // Convert: tabs → commas, quote fields that contain commas
+      const csv = lines.map(line =>
+        line.split("\t").map(cell => {
+          if (cell.includes(",") || cell.includes('"') || cell.includes("\n")) {
+            return '"' + cell.replace(/"/g, '""') + '"';
+          }
+          return cell;
+        }).join(",")
+      ).join("\n");
+      const ta = document.getElementById("csvInput");
+      const start = ta.selectionStart, end = ta.selectionEnd;
+      ta.value = ta.value.slice(0, start) + csv + ta.value.slice(end);
+      ta.selectionStart = ta.selectionEnd = start + csv.length;
+      ta.dispatchEvent(new Event("input"));
+      ta.dispatchEvent(new Event("change"));
+      log("Detected Excel/Sheets table paste — converted to CSV automatically.", "info");
+    });
+
+    // ── Drag-and-drop CSV / Excel files ───────────────────────────
+    const csvDropZone = document.getElementById("csvDropZone");
+    if (csvDropZone) {
+      csvDropZone.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        csvDropZone.classList.add("drag-over");
+      });
+      csvDropZone.addEventListener("dragleave", () => {
+        csvDropZone.classList.remove("drag-over");
+      });
+      csvDropZone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        csvDropZone.classList.remove("drag-over");
+        const file = e.dataTransfer?.files?.[0];
+        if (!file) return;
+        // Reuse the existing file upload handler by injecting the file into csvFileInput
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        const fi = document.getElementById("csvFileInput");
+        fi.files = dt.files;
+        fi.dispatchEvent(new Event("change"));
+      });
+    }
+
+    // ── Quick email entry mode toggle ─────────────────────────────
+    document.getElementById("quickModeBtn")?.addEventListener("click", toggleQuickMode);
+    document.getElementById("quickEmailInput")?.addEventListener("input", () => {
+      updateQuickModeCSV();
+    });
+
+    // ── Sync recipients from Outlook's native To field ────────────
+    document.getElementById("syncRecipientsBtn")?.addEventListener("click", () => {
+      syncRecipientsFromOutlook();
+    });
+
     // Feature 8: load persisted rate limit state
     loadRateLimitState();
 
@@ -533,17 +709,60 @@ Office.onReady((info) => {
   }
 });
 
+/* ─── SWIPE-BACK / HORIZONTAL SCROLL GUARD ────────────────────
+   On macOS + Chrome, a two-finger horizontal swipe on a trackpad
+   inside an Office add-in iframe can trigger the browser's
+   back/forward navigation, navigating away from the compose window.
+
+   Fix: intercept wheel events where the horizontal delta exceeds
+   the vertical delta (i.e. a deliberate horizontal swipe), and
+   call preventDefault() so Chrome never sees it as a navigation
+   gesture. We only do this when the page itself has no horizontal
+   scroll room (scrollWidth === clientWidth), meaning the swipe
+   was never meant to scroll content anyway.
+   ─────────────────────────────────────────────────────────── */
+(function installSwipeGuard() {
+  document.addEventListener("wheel", function(e) {
+    // Only intercept clearly horizontal swipes
+    if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+    // If the element being scrolled has horizontal scroll room, let it scroll
+    let el = e.target;
+    while (el && el !== document.documentElement) {
+      if (el.scrollWidth > el.clientWidth) return;
+      el = el.parentElement;
+    }
+    // No horizontal scroll room anywhere in the chain — block the swipe
+    e.preventDefault();
+  }, { passive: false });
+})();
+
 /* ─── LOGGING ─────────────────────────────────────────────────── */
 
+/**
+ * Append a timestamped message to the full status log (#statusLog) and
+ * also update the single-line mini log strip in the sticky footer.
+ *
+ * Log levels and their colour treatment:
+ *   "info"    — muted grey-purple  — routine progress messages
+ *   "success" — green              — successful email sends
+ *   "warning" — amber              — non-fatal issues (skipped rows, etc.)
+ *   "error"   — red                — hard failures requiring attention
+ *
+ * @param {string} message - Human-readable log message
+ * @param {"info"|"success"|"warning"|"error"} [type="info"] - Log level
+ */
 function log(message, type = "info") {
   const logEl = document.getElementById("statusLog");
   const entry = document.createElement("p");
-  entry.className = `log-entry log-${type}`;
+  entry.className = `log-entry log-${type}`;   // CSS colours defined in taskpane.css
   const time = new Date().toLocaleTimeString();
   entry.textContent = `[${time}] ${message}`;
   logEl.appendChild(entry);
-  logEl.scrollTop = logEl.scrollHeight;
+  logEl.scrollTop = logEl.scrollHeight;  // auto-scroll so latest message is always visible
 
+  // Mirror the latest message in the compact footer mini log strip.
+  // The colour codes here match the CSS log-* colours but as inline
+  // styles so they work on the dark footer background.
   const mini = document.getElementById("footerLogMini");
   if (mini) {
     mini.textContent = `[${time}] ${message}`;
@@ -554,45 +773,214 @@ function log(message, type = "info") {
   }
 }
 
+/**
+ * Clear all entries from the status log and reset to the initial ready state.
+ */
 function clearLog() {
   document.getElementById("statusLog").innerHTML = "";
   log("Log cleared.", "info");
 }
 
+/* ─── OUTLOOK SUBJECT SYNC ──────────────────────────────────────
+   Two-way bridge between the taskpane subject field and Outlook's
+   native compose subject field, so non-technical users can type in
+   either place and have them stay in sync automatically.
+   ─────────────────────────────────────────────────────────────── */
+
+/**
+ * Read Outlook's native subject → update the taskpane input.
+ * @param {boolean} force  true = always overwrite, false = only if Outlook changed since last sync
+ */
+function syncSubjectFromOutlook(force) {
+  // Don't overwrite the taskpane while the user is actively typing in it
+  if (!force && subjectHasFocus) return;
+  try {
+    Office.context.mailbox.item.subject.getAsync(result => {
+      if (result.status !== Office.AsyncResultStatus.Succeeded) return;
+      const outlookSubject = result.value || "";
+      // Skip if nothing changed since we last read/pushed (avoids echo-back loops)
+      if (!force && outlookSubject === _lastOutlookSubject) return;
+      _lastOutlookSubject = outlookSubject;
+      const input = document.getElementById("subjectInput");
+      if (!input) return;
+      // Don't interrupt typing — recheck focus inside the async callback too
+      if (!force && subjectHasFocus) return;
+      if (input.value !== outlookSubject) {
+        input.value = outlookSubject;
+        lsSet(LS_KEY_SUBJECT, outlookSubject);
+      }
+    });
+  } catch (e) { /* Office context unavailable — fail silently */ }
+}
+
+/**
+ * Push the taskpane subject value to Outlook's native compose subject field.
+ * @param {string} value
+ */
+function pushSubjectToOutlook(value) {
+  try {
+    _lastOutlookSubject = value; // record what we pushed so the next poll won't echo it back
+    Office.context.mailbox.item.subject.setAsync(value, () => {});
+  } catch (e) { /* fail silently */ }
+}
+
+/* ─── QUICK EMAIL ENTRY MODE ────────────────────────────────────
+   A simple "paste or type emails one per line" mode that removes
+   the CSV barrier for non-technical users doing small sends.
+   ─────────────────────────────────────────────────────────────── */
+
+let _quickModeActive = false;
+
+function toggleQuickMode() {
+  _quickModeActive = !_quickModeActive;
+  const btn     = document.getElementById("quickModeBtn");
+  const csvArea = document.getElementById("csvSection");
+  const qArea   = document.getElementById("quickSection");
+
+  if (_quickModeActive) {
+    csvArea?.classList.add("hidden");
+    qArea?.classList.remove("hidden");
+    if (btn) btn.textContent = "📋 Switch to CSV mode";
+    document.getElementById("quickEmailInput")?.focus();
+  } else {
+    csvArea?.classList.remove("hidden");
+    qArea?.classList.add("hidden");
+    if (btn) btn.textContent = "📧 Quick: type emails";
+  }
+}
+
+let _quickModeParseTimer = null;
+
+function updateQuickModeCSV() {
+  const raw = document.getElementById("quickEmailInput")?.value || "";
+  const emails = raw.split(/[\n,;]+/).map(e => e.trim()).filter(e => e && EMAIL_REGEX.test(e));
+  const csvInput = document.getElementById("csvInput");
+  if (!csvInput) return;
+  if (emails.length === 0) {
+    csvInput.value = "";
+  } else {
+    csvInput.value = "email\n" + emails.join("\n");
+  }
+  csvInput.dispatchEvent(new Event("input"));
+  csvInput.dispatchEvent(new Event("change"));
+  // Debounce parseAndPreview — don't re-parse on every keypress
+  clearTimeout(_quickModeParseTimer);
+  if (emails.length > 0) {
+    _quickModeParseTimer = setTimeout(() => parseAndPreview(), 350);
+  }
+}
+
+/* ─── SYNC RECIPIENTS FROM OUTLOOK'S TO FIELD ───────────────────
+   Reads the native To field of the compose window and pre-populates
+   the CSV with those addresses — great for small ad-hoc sends.
+   ─────────────────────────────────────────────────────────────── */
+
+function syncRecipientsFromOutlook() {
+  try {
+    Office.context.mailbox.item.to.getAsync(result => {
+      if (result.status !== Office.AsyncResultStatus.Succeeded) {
+        log("Could not read To field from Outlook.", "warning");
+        return;
+      }
+      const recipients = result.value || [];
+      if (recipients.length === 0) {
+        log("Outlook's To field is empty — add addresses there first.", "warning");
+        return;
+      }
+      const csvLines = ["email,display_name"];
+      recipients.forEach(r => {
+        const addr = (r.emailAddress || "").trim();
+        const name = (r.displayName || "").replace(/,/g, " ");
+        if (addr) csvLines.push(`${addr},${name}`);
+      });
+      const csvInput = document.getElementById("csvInput");
+      if (csvInput) {
+        csvInput.value = csvLines.join("\n");
+        csvInput.dispatchEvent(new Event("input"));
+        csvInput.dispatchEvent(new Event("change"));
+        parseAndPreview();
+        log(`Imported ${recipients.length} address${recipients.length !== 1 ? "es" : ""} from Outlook's To field.`, "success");
+      }
+      // Clear Outlook's To field so the merge engine populates it per-recipient
+      Office.context.mailbox.item.to.setAsync([], () => {});
+    });
+  } catch (e) {
+    log("syncRecipientsFromOutlook: " + e.message, "error");
+  }
+}
+
+/**
+ * Wire up the tab navigation bar.
+ *
+ * Each .tab-btn has a data-tab attribute matching the id of a .tab-pane
+ * (e.g. data-tab="compose" → #tab-compose). On click:
+ *   1. Remove .active from all buttons, set aria-selected="false"
+ *   2. Hide all .tab-pane elements
+ *   3. Activate the clicked button and reveal the matching pane
+ *   4. If the user switched to the Compose tab, trigger a subject sync
+ *      so the taskpane subject reflects any changes made in Outlook's
+ *      native compose area since the last poll.
+ */
 function initTabs() {
   document.querySelectorAll(".tab-bar .tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       const target = btn.dataset.tab;
+      // Deactivate all tab buttons
       document.querySelectorAll(".tab-bar .tab-btn").forEach(b => {
         b.classList.remove("active");
         b.setAttribute("aria-selected", "false");
       });
+      // Hide all tab panels
       document.querySelectorAll(".tab-pane").forEach(p => p.classList.add("hidden"));
+      // Activate the clicked button and show its panel
       btn.classList.add("active");
       btn.setAttribute("aria-selected", "true");
       document.getElementById(`tab-${target}`).classList.remove("hidden");
+      // Pull any changes the user typed directly in Outlook's subject field
+      if (target === "compose") syncSubjectFromOutlook(false);
     });
   });
 }
 
+/**
+ * Wire up all .accordion-hdr buttons.
+ *
+ * Each header has a data-accordion attribute that matches the ID suffix of
+ * its body element (e.g. data-accordion="optout" → #accordion-optout).
+ * On click, toggle the body's .hidden class and the header's .open class
+ * (the .open class rotates the › chevron via CSS).
+ */
 function initAccordions() {
   document.querySelectorAll(".accordion-hdr").forEach(hdr => {
     hdr.addEventListener("click", () => {
       const body = document.getElementById(`accordion-${hdr.dataset.accordion}`);
       if (!body) return;
       const isOpen = !body.classList.contains("hidden");
-      body.classList.toggle("hidden", isOpen);
-      hdr.classList.toggle("open", !isOpen);
+      body.classList.toggle("hidden", isOpen);   // close if open, open if closed
+      hdr.classList.toggle("open", !isOpen);      // sync the chevron rotation
     });
   });
 }
 
 /* ─── LOCAL STATE PERSISTENCE ─────────────────────────────────── */
 
+/**
+ * Safely read a value from localStorage, returning defaultVal on any error
+ * (quota exceeded, storage restricted by the Office webview, JSON parse fail).
+ *
+ * If defaultVal is a non-null object, the stored string is JSON-parsed so
+ * callers receive an object back rather than a raw string.
+ *
+ * @param {string} key         - localStorage key
+ * @param {*}      [defaultVal] - Value to return when key is absent or errors
+ * @returns {*} Stored value (or defaultVal)
+ */
 function lsGet(key, defaultVal) {
   try {
     const raw = localStorage.getItem(key);
     if (raw === null) return defaultVal !== undefined ? defaultVal : null;
+    // Auto-parse JSON when the caller passed a non-null object as the default —
+    // this signals that the stored value should be an object, not a string.
     if (defaultVal !== null && typeof defaultVal === "object") {
       try { return JSON.parse(raw); } catch { return defaultVal; }
     }
@@ -600,14 +988,36 @@ function lsGet(key, defaultVal) {
   } catch { return defaultVal !== undefined ? defaultVal : null; }
 }
 
+/**
+ * Safely write a value to localStorage, silently swallowing quota or
+ * webview-restriction errors so the app continues to work read-only.
+ *
+ * @param {string} key   - localStorage key
+ * @param {string} value - String value to store (stringify objects before calling)
+ */
 function lsSet(key, value) {
   try { localStorage.setItem(key, value); } catch { /* quota exceeded or restricted webview */ }
 }
 
+/**
+ * Safely delete a key from localStorage.
+ * @param {string} key
+ */
 function lsRemove(key) {
   try { localStorage.removeItem(key); } catch { /* ignore */ }
 }
 
+/**
+ * Restore persisted state from the previous session.
+ * Called once during Office.onReady() after UI elements are set up.
+ *
+ * Restores:
+ *   - Subject line text (LS_KEY_SUBJECT)
+ *   - CSV recipient data (LS_KEY_CSV) — triggers parseAndPreview() to rebuild the table
+ *   - Custom tag chips (LS_KEY_TAGS)
+ *   - Saved email templates (rendered into the template list)
+ *   - Greeting format / fallback settings (LS_KEY_GREETING)
+ */
 function restoreLocalState() {
   const savedSubject = lsGet(LS_KEY_SUBJECT);
   if (savedSubject) {
@@ -619,14 +1029,19 @@ function restoreLocalState() {
   if (savedCsv) {
     document.getElementById("csvInput").value = savedCsv;
     log("Restored CSV data from saved session.", "info");
-    parseAndPreview();
+    parseAndPreview();  // rebuild recipient table from the restored CSV string
   }
 
+  // Restore user-added custom tag chips (non-default, non-smart tags).
+  // DEFAULT_TAGS are already rendered in the HTML; duplicates are silently ignored by addTagToBar().
   const savedTags = JSON.parse(lsGet(LS_KEY_TAGS) || "[]");
   savedTags.forEach(tag => addTagToBar(tag));
 
-  renderTemplateList();
+  renderTemplateList();  // rebuild the saved-template picker in the Compose tab
 
+  // Restore greeting format and fallback text.
+  // The stored value may be a JSON string or already-parsed object depending on
+  // which version of lsGet was used when it was saved — handle both.
   const savedGreeting = lsGet(LS_KEY_GREETING, null);
   if (savedGreeting) {
     try {
@@ -634,15 +1049,23 @@ function restoreLocalState() {
       greetingConfig = g;
       document.getElementById("greetingFormat").value   = g.format   || "dear_sal_last";
       document.getElementById("greetingFallback").value = g.fallback || "Dear Valued Customer";
-    } catch { /* ignore malformed */ }
+    } catch { /* ignore malformed stored data */ }
   }
 }
 
+/**
+ * Persist the current set of custom tag chips to localStorage so they
+ * survive page reloads. Filters out DEFAULT_TAGS (built-in chips that are
+ * already in the HTML and don't need to be stored separately).
+ *
+ * Called by addTagToBar() (when a new chip is added) and by removeTagFromBar()
+ * (when a chip is removed).
+ */
 function saveCustomTagsToStorage() {
   const tagEls = document.querySelectorAll("#tagBar [data-tag]");
   const tags = Array.from(tagEls)
     .map(el => el.dataset.tag)
-    .filter(t => !DEFAULT_TAGS.includes(t));
+    .filter(t => !DEFAULT_TAGS.includes(t));  // exclude built-in default chips
   lsSet(LS_KEY_TAGS, JSON.stringify(tags));
 }
 
@@ -1291,8 +1714,24 @@ async function handleRetryFailed() {
 
 /* ─── TAG INSERTION ────────────────────────────────────────────── */
 
-function insertTag(tag) {
-  if (subjectHasFocus) {
+/**
+ * Insert a tag placeholder into either the subject line or the email body.
+ *
+ * @param {string} tag          - The placeholder string, e.g. "{{first_name}}"
+ * @param {boolean} forceSubject - When true, insert into the subject input even
+ *                                 if subjectHasFocus is currently false. This is
+ *                                 needed because blur fires before click in the
+ *                                 browser event order — by the time the click
+ *                                 handler runs, subjectHasFocus is already false.
+ *                                 The caller passes _subjectWasFocused (captured
+ *                                 on mousedown, before blur) as this argument.
+ */
+function insertTag(tag, forceSubject = false) {
+  if (forceSubject || subjectHasFocus) {
+    // ── Path 1: Insert at cursor in the taskpane #subjectInput ────
+    // Used when the taskpane subject field has (or just had) focus.
+    // The input's existing "input" listener then debounces a push to
+    // the native Outlook subject via pushSubjectToOutlook().
     const input = document.getElementById("subjectInput");
     const start = input.selectionStart;
     const end   = input.selectionEnd;
@@ -1300,9 +1739,47 @@ function insertTag(tag) {
     input.value = value.slice(0, start) + tag + value.slice(end);
     const newCursor = start + tag.length;
     input.setSelectionRange(newCursor, newCursor);
+
+    // Fire "input" so lsSet() persists the value and the 400 ms push
+    // timer to Outlook's native subject field starts.
+    input.dispatchEvent(new Event("input"));
+
+    // Restore focus so the user can click another tag immediately.
     input.focus();
-    log(`Inserted tag into subject: ${tag}`, "success");
+    log(`Inserted tag into subject (taskpane): ${tag}`, "success");
+
+  } else if (tagTarget === "subject") {
+    // ── Path 2: Append to the Outlook native subject via Office.js ─
+    // Used when the "Subject" toggle is active and #subjectInput is
+    // not focused. We read the current subject, append the tag, write
+    // it back, and mirror the result into #subjectInput so the two
+    // stay in sync (the poll would catch it anyway but this is instant).
+    Office.context.mailbox.item.subject.getAsync((getResult) => {
+      if (getResult.status !== Office.AsyncResultStatus.Succeeded) {
+        log(`Could not read subject: ${getResult.error.message}`, "error");
+        return;
+      }
+      const newSubject = getResult.value + tag;
+      Office.context.mailbox.item.subject.setAsync(newSubject, (setResult) => {
+        if (setResult.status !== Office.AsyncResultStatus.Succeeded) {
+          log(`Failed to set subject: ${setResult.error.message}`, "error");
+        } else {
+          // Mirror into taskpane subject input immediately.
+          const input = document.getElementById("subjectInput");
+          input.value = newSubject;
+          // Dispatch "input" to persist to localStorage (skip the
+          // push-to-Outlook debounce — we just came FROM Outlook).
+          lsSet(LS_KEY_SUBJECT, newSubject);
+          log(`Inserted tag into subject (native): ${tag}`, "success");
+        }
+      });
+    });
+
   } else {
+    // ── Path 3: Insert into the email body via Office.js ──────────
+    // setSelectedDataAsync inserts at the current cursor position in
+    // the Outlook compose body. On macOS, only Text coercion is
+    // supported; HTML works on Windows.
     const isMac = Office.context.platform === Office.PlatformType.Mac;
     const coercionType = isMac ? Office.CoercionType.Text : Office.CoercionType.Html;
     Office.context.mailbox.item.body.setSelectedDataAsync(
@@ -1310,7 +1787,7 @@ function insertTag(tag) {
       { coercionType },
       (result) => {
         if (result.status !== Office.AsyncResultStatus.Succeeded) {
-          log(`Failed to insert tag: ${tag}`, "error");
+          log(`Failed to insert tag into body: ${tag}`, "error");
         } else {
           log(`Inserted tag into body: ${tag}`, "success");
         }
@@ -1319,26 +1796,94 @@ function insertTag(tag) {
   }
 }
 
+/**
+ * Read the value from #customTagInput, normalise it into a {{tag}} format,
+ * add it to the tag bar as a custom chip, and immediately insert it into
+ * the currently focused field (body or subject line).
+ *
+ * Normalisation rules: lowercase, spaces replaced with underscores.
+ * Example: "First Name" → {{first_name}}
+ *
+ * Called by the "Add tag" button click handler and the Enter keydown
+ * listener on #customTagInput.
+ */
 function addCustomTag() {
   const input = document.getElementById("customTagInput");
   const name  = input.value.trim();
   if (!name) return;
+  // Normalise: lowercase + underscores so the tag matches CSV column name conventions
   const normalized = name.toLowerCase().replace(/\s+/g, "_");
   const tag = `{{${normalized}}}`;
-  addTagToBar(tag);
-  insertTag(tag);
-  input.value = "";
+  addTagToBar(tag);      // add the chip to the bar (no-op if already present)
+  insertTag(tag);        // insert immediately into the focused field
+  input.value = "";      // clear the input for the next custom tag
 }
 
+/**
+ * Add a tag chip to #tagBar if it isn't already there.
+ *
+ * Each chip structure:
+ *   <span class="tag [tag-smart|tag-custom]" data-tag="{{field}}">
+ *     <span class="tag-label">{{field}}</span>
+ *     <!-- only for non-default, non-smart chips: -->
+ *     <button class="tag-remove-btn" aria-label="Remove {{field}} tag">✕</button>
+ *   </span>
+ *
+ * The .tag-label span separates the display text from the ✕ button so
+ * that e.target.closest("[data-tag]") in the click handler still resolves
+ * to the chip even when the user clicks the label text directly.
+ *
+ * Remove buttons are added only to custom (user-added / CSV-column) chips.
+ * Default chips (those in DEFAULT_TAGS[]) and smart chips (type === "smart")
+ * are permanent and do not get a remove button.
+ *
+ * @param {string} tag   - The placeholder string, e.g. "{{first_name}}"
+ * @param {string} [type] - "smart" for computed tags like {{today}} / {{greeting_line}}
+ */
 function addTagToBar(tag, type) {
+  // Bail out early if this tag chip already exists (prevents duplicates
+  // when restoring from localStorage or re-parsing the same CSV).
   const existing = document.querySelector(`#tagBar [data-tag="${CSS.escape(tag)}"]`);
   if (existing) return;
-  const bar    = document.getElementById("tagBar");
-  const chip   = document.createElement("span");
+
+  const bar  = document.getElementById("tagBar");
+  const chip = document.createElement("span");
   chip.className   = type === "smart" ? "tag tag-smart" : "tag tag-custom";
   chip.dataset.tag = tag;
-  chip.textContent = tag;
-  // Feature 14: keyboard accessibility
+
+  // Label span — holds the visible tag text (e.g. "{{company}}").
+  // Using a child span (rather than setting textContent directly on the chip)
+  // means clicks on the label still bubble up to the chip's [data-tag] element,
+  // which closest() in the click handler can find.
+  const labelSpan = document.createElement("span");
+  labelSpan.className   = "tag-label";
+  labelSpan.textContent = tag;
+  chip.appendChild(labelSpan);
+
+  // Remove button — only for non-default, non-smart custom chips.
+  // DEFAULT_TAGS is the array of built-in placeholder names defined near
+  // the top of this file. Smart chips (type === "smart") are also permanent.
+  const isDefault = DEFAULT_TAGS.includes(tag);
+  const isSmart   = type === "smart";
+  if (!isDefault && !isSmart) {
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "tag-remove-btn";
+    removeBtn.textContent = "✕";
+    removeBtn.setAttribute("aria-label", `Remove ${tag} tag`);
+    removeBtn.title = `Remove ${tag}`;
+    // stopPropagation prevents the remove click from also triggering
+    // the chip's insert handler (which is registered on the tagBar div).
+    removeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      removeTagFromBar(tag);
+    });
+    // Also block mousedown propagation so _subjectWasFocused isn't
+    // snapshotted incorrectly when the user clicks the remove button.
+    removeBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+    chip.appendChild(removeBtn);
+  }
+
+  // Keyboard accessibility: Enter / Space triggers a click on the chip.
   chip.setAttribute("tabindex", "0");
   chip.setAttribute("role", "button");
   chip.setAttribute("aria-label", "Insert " + tag);
@@ -1348,8 +1893,42 @@ function addTagToBar(tag, type) {
       chip.click();
     }
   });
+
   bar.appendChild(chip);
+  // Persist non-smart custom tags to localStorage so they survive page reloads.
   if (type !== "smart") saveCustomTagsToStorage();
+}
+
+/**
+ * Remove a custom tag chip from #tagBar and update localStorage.
+ * Only call this for user-added or CSV-column chips — default and smart
+ * chips should never be removed.
+ *
+ * @param {string} tag - The placeholder string to remove, e.g. "{{city}}"
+ */
+function removeTagFromBar(tag) {
+  const chip = document.querySelector(`#tagBar [data-tag="${CSS.escape(tag)}"]`);
+  if (chip) {
+    chip.remove();
+    saveCustomTagsToStorage();  // update persisted custom tags list
+    log(`Removed custom tag: ${tag}`, "info");
+  }
+}
+
+/**
+ * Update the #tagsHint hint text to tell the user whether clicking a
+ * tag chip will insert into the subject line or the email body.
+ * Called on subjectInput focus (targetIsSubject=true) and on blur
+ * (targetIsSubject=false, after a 150 ms delay via _hintResetTimer).
+ *
+ * @param {boolean} targetIsSubject - true when subject input is focused
+ */
+function updateTagHint(targetIsSubject) {
+  const el = document.getElementById("tagsHint");
+  if (!el) return;
+  el.innerHTML = targetIsSubject
+    ? "👆 Click any tag to insert into the <strong>subject line</strong>"
+    : "👆 Click any tag to insert it into your <strong>email body</strong>";
 }
 
 /* ─── FILE UPLOAD: CSV + EXCEL ─────────────────────────────────── */
@@ -2627,7 +3206,26 @@ function getJitterMs() {
   return (lo + Math.random() * (hi - lo)) * 1000;
 }
 
-// L1: non-recursive retry — eliminates unbounded recursion under persistent 429s
+/**
+ * Send a Microsoft Graph $batch request with automatic retry on rate-limit (429) responses.
+ *
+ * Why non-recursive: earlier versions used tail-call recursion which caused
+ * "maximum call stack exceeded" errors when a persistent 429 produced many
+ * retry rounds. This iterative version uses a for-loop with a pending queue
+ * to avoid that, while still retrying only the throttled sub-set.
+ *
+ * Retry logic:
+ *   - If the top-level batch response is 429, wait Retry-After seconds and
+ *     retry all pending requests (the whole batch was rejected by the gateway).
+ *   - If individual requests inside the batch are 429, collect them and retry
+ *     only those on the next loop iteration.
+ *   - After MAX_RETRIES exhausted attempts, mark remaining items as failed
+ *     rather than looping forever.
+ *
+ * @param {Object[]} requests - Graph batch request objects (id, method, url, headers, body)
+ * @param {string}   token    - OAuth2 Bearer token for the Authorization header
+ * @returns {Promise<{responses: Object[]}>} - Combined responses for all request IDs
+ */
 async function sendBatchWithRetry(requests, token) {
   let pending = requests.slice();
   const results = [];
@@ -3092,10 +3690,23 @@ async function showPreSendConfirmation(recipients, batchDelayMs, scheduledCount)
     sendBreakdown = '<br><span style="color:var(--text-muted,#605e5c);font-size:12px;">All ' + scheduledCount + ' scheduled per send_at column</span>';
   }
 
+  // Build a personalized subject preview for the first recipient
+  const subjectTemplate = document.getElementById("subjectInput")?.value || "";
+  let firstSubjectPreview = "";
+  if (subjectTemplate && typeof personalize === "function") {
+    try { firstSubjectPreview = personalize(subjectTemplate, first); } catch(e) { firstSubjectPreview = subjectTemplate; }
+  }
+
   document.getElementById("preSendSummary").innerHTML =
-    "<strong>" + count + "</strong> email" + (count !== 1 ? "s" : "") + " will be sent." + sendBreakdown + "<br>" +
-    "Estimated time: <strong>" + estStr + "</strong><br>" +
-    "First recipient: <strong>" + escapeHtml(firstName) + "</strong> &lt;" + escapeHtml(first.email || "") + "&gt;";
+    `<div style="background:var(--surface,#f3f2f1);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:13px;line-height:1.7;">
+      🚀 You're about to send <strong>${count}</strong> personalised email${count !== 1 ? "s" : ""}.${sendBreakdown ? "<br>" + sendBreakdown.replace(/<br>/, "") : ""}
+    </div>
+    <div style="font-size:12px;color:var(--text-muted,#605e5c);margin-bottom:6px;">First email preview:</div>
+    <div style="background:var(--surface,#f3f2f1);border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.6;">
+      <strong>To:</strong> ${escapeHtml(firstName)} &lt;${escapeHtml(first.email || "")}&gt;<br>
+      ${firstSubjectPreview ? "<strong>Subject:</strong> " + escapeHtml(firstSubjectPreview) + "<br>" : ""}
+      <strong>Est. time:</strong> ${estStr}
+    </div>`;
   return new Promise(function(resolve) {
     const prevFocus = document.activeElement;
     const modal = document.getElementById("preSendModal");
@@ -3268,6 +3879,26 @@ function setMergeRunning(running) {
 
 /* ─── MAIN MERGE RUNNER ────────────────────────────────────────── */
 
+/**
+ * Orchestrate the full mail merge send run.
+ *
+ * High-level flow:
+ *   1. Guard against re-entrant clicks (mergeInProgress flag)
+ *   2. Parse and validate the recipient list
+ *   3. Acquire an OAuth2 token via Office.js SSO
+ *   4. Show a pre-send confirmation modal with a human-readable summary
+ *   5. Dispatch emails in Graph $batch chunks of up to BATCH_SIZE (20)
+ *   6. After each batch, apply the user-configured batch delay
+ *   7. Respect the hourly rate limit and daily cap if set
+ *   8. Show the retry button + download report on completion
+ *
+ * All async waits use await so the UI stays responsive throughout.
+ * The cancelRequested flag (set by handleStop()) is checked between
+ * batches so the user can abort without killing the current batch.
+ *
+ * @async
+ * @returns {Promise<void>}
+ */
 async function handleMergeClick() {
   // BUG 1: double-send guard — prevents concurrent merges from multiple clicks during async modals
   if (mergeInProgress) {

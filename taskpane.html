@@ -1,11 +1,26 @@
 <!DOCTYPE html>
+<!-- ═══════════════════════════════════════════════════════════════
+     Mail Merge Add-in — Taskpane UI  v2.6.0
+     Sideloaded into Outlook compose window via manifest-personal.xml
+     Served from: leighton-grey.github.io/mail-merge-addin
+     ═══════════════════════════════════════════════════════════════ -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <!-- viewport: width=device-width stops Office from zooming the
+       taskpane on high-DPI screens; initial-scale=1 prevents auto-zoom. -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Mail Merge</title>
 
-  <!-- Content Security Policy -->
+  <!-- Content Security Policy ──────────────────────────────────────
+       Restricts what resources the page can load and where it can
+       connect to. This is required by Office Store policy.
+       - default-src 'self'        : blocks anything not explicitly listed
+       - script-src                : Office.js (CDN), XLSX (cdnjs)
+       - connect-src               : Microsoft Graph API, login, DNS-over-HTTPS
+       - style-src 'unsafe-inline' : needed for inline style="" attributes
+       - img-src data:             : allows base64 data: URIs for icons
+       ─────────────────────────────────────────────────────────── -->
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'self';
              script-src 'self' https://appsforoffice.microsoft.com https://ajax.aspnetcdn.com https://cdnjs.cloudflare.com;
@@ -13,30 +28,55 @@
              style-src 'self' 'unsafe-inline';
              img-src 'self' data:;" />
 
-  <!-- Office.js -->
+  <!-- Office.js ────────────────────────────────────────────────────
+       The Office Add-in platform JavaScript library. Must be loaded
+       before any Office.* API calls. Uses /lib/1/ (latest v1.x) so
+       the host always serves the most recent compatible build.
+       ─────────────────────────────────────────────────────────── -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js" type="text/javascript"></script>
 
-  <!-- SheetJS — Excel parsing, loaded from CDN -->
-  <!-- TODO: add integrity="sha512-..." SRI hash once verified for production -->
+  <!-- SheetJS — Excel/XLSX parsing ────────────────────────────────
+       Allows users to upload .xlsx files as their recipient list in
+       addition to plain CSV. Loaded from cdnjs with an SRI hash so
+       the browser refuses a tampered version of the library.
+       ─────────────────────────────────────────────────────────── -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"
           type="text/javascript"
+          integrity="sha384-OLBgp1GsljhM2TJ+sbHjaiH9txEUvgdDTAzHv2P24donTt6/529l+9Ua0vFImLlb"
           crossorigin="anonymous"></script>
 
-  <!-- App styles -->
-  <link rel="stylesheet" href="taskpane.css?v=2.6.0" />
+  <!-- App styles — cache-busted with ?v=2.6.0 so browsers pick up
+       new CSS after a version update.                              -->
+  <link rel="stylesheet" href="taskpane.css?v=2.6.1" />
 </head>
+
+<!-- body is a flex column: header → tab-bar → scrollable content → sticky footer.
+     The flex layout is defined in taskpane.css on the body selector. -->
 <body>
+
+  <!-- ── Branding header ──────────────────────────────────────────
+       Always-visible top bar with app logo and name.
+       flex-shrink: 0 in CSS prevents it from compressing.       -->
   <div class="header">
     <span class="header-icon"><img src="assets/icon-color.png" alt="" /></span>
     <span class="header-title">Mail Merge</span>
   </div>
 
+  <!-- ── Tab navigation bar ────────────────────────────────────────
+       Sticky below the header. JS listens for clicks on .tab-btn
+       elements, toggles the .active class, and shows/hides the
+       matching .tab-pane using data-tab attribute matching.
+       ARIA roles make this accessible to screen readers.         -->
   <div class="tab-bar" role="tablist">
     <button class="tab-btn active" data-tab="recipients" role="tab" aria-selected="true">👥 Recipients</button>
-    <button class="tab-btn" data-tab="compose" role="tab" aria-selected="false">✏️ Compose</button>
-    <button class="tab-btn" data-tab="options" role="tab" aria-selected="false">⚙️ Options</button>
+    <button class="tab-btn" data-tab="compose"    role="tab" aria-selected="false">✏️ Compose</button>
+    <button class="tab-btn" data-tab="options"    role="tab" aria-selected="false">⚙️ Options</button>
   </div>
 
+  <!-- ── Scrollable content area ───────────────────────────────────
+       flex: 1 in CSS expands this to fill all vertical space between
+       the tab bar and the sticky footer. overflow-y: auto adds a
+       scrollbar only when the stacked section cards overflow.     -->
   <div class="tab-content-wrap">
 
     <!-- Tab: Recipients -->
@@ -54,22 +94,41 @@
         <a id="dismissGettingStarted" href="#" style="font-size:11px;color:var(--text-muted);">Dismiss</a>
       </div>
 
+      <!-- Recipients source switcher -->
+      <div class="section" style="padding-bottom:6px;">
+        <div class="csv-upload-row" style="flex-wrap:wrap;gap:6px;">
+          <button class="btn-secondary" id="quickModeBtn">📧 Quick: type emails</button>
+          <button class="btn-secondary" id="syncRecipientsBtn" title="Import addresses from Outlook's To field into the recipient list">📥 Import from To field</button>
+          <button class="btn-secondary" id="importContactsBtn">👤 From Contacts</button>
+          <span id="recipientCount" class="count-badge" style="margin-left:auto;"></span>
+        </div>
+      </div>
+
+      <!-- Quick email entry mode (hidden by default) -->
+      <div id="quickSection" class="section hidden">
+        <label class="label">Type or paste email addresses</label>
+        <textarea id="quickEmailInput" class="csv-area" style="height:90px;"
+          placeholder="john@example.com&#10;jane@example.com&#10;bob@example.com"></textarea>
+        <p class="hint">One email per line — or paste a comma/semicolon separated list. The add-in converts them automatically.</p>
+      </div>
+
       <!-- CSV section -->
-      <div class="section">
+      <div id="csvSection" class="section">
         <div class="csv-upload-row">
           <button class="btn-secondary" id="uploadCsvBtn">📂 Load file</button>
           <input type="file" id="csvFileInput" accept=".csv,.xlsx,.xls,text/csv" class="hidden" />
-          <button class="btn-secondary" id="importContactsBtn">👤 From Contacts</button>
-          <span class="hint-inline">or paste CSV below</span>
-          <a id="downloadSampleCsv" href="#" style="font-size:11px;color:var(--accent,#534AB7);text-decoration:none;margin-left:8px;" title="Download a sample CSV file">&#11015; Sample CSV</a>
-          <span id="recipientCount" class="count-badge"></span>
+          <a id="downloadSampleCsv" href="#" style="font-size:11px;color:var(--accent,#534AB7);text-decoration:none;margin-left:4px;" title="Download a sample CSV file">&#11015; Sample</a>
         </div>
-        <textarea id="csvInput" class="csv-area"
-          placeholder="email,first_name,last_name&#10;john@example.com,John,Smith"></textarea>
+        <!-- Drag-and-drop zone wraps the textarea -->
+        <div id="csvDropZone" class="csv-drop-zone">
+          <textarea id="csvInput" class="csv-area"
+            placeholder="email,first_name,last_name&#10;john@example.com,John,Smith&#10;&#10;💡 Drag a CSV or Excel file here, or paste a copied Excel table — it converts automatically."></textarea>
+          <div class="csv-drop-hint">Drop CSV or Excel file here</div>
+        </div>
         <div class="csv-actions">
           <button class="btn-secondary" id="previewBtn">Preview</button>
           <button class="btn-secondary" id="mapFieldsBtn" style="display:none;">⇄ Map fields</button>
-          <span class="hint" style="flex:1;margin:0;font-size:10px">Headers required: <code>email</code>. Optional: <code>cc</code> <code>bcc</code> <code>attachment</code> <code>display_name</code> <code>salutation</code> <code>first_name</code> <code>last_name</code> <code>gender</code> <code>skip_if</code> <code>send_at</code>. Auto-detects comma, semicolon, or tab delimiters.</span>
+          <span class="hint" style="flex:1;margin:0;font-size:10px">Headers required: <code>email</code>. Optional: <code>cc</code> <code>bcc</code> <code>attachment</code> <code>display_name</code> <code>first_name</code> <code>last_name</code> <code>skip_if</code> <code>send_at</code>. Auto-detects comma, semicolon, tab, or pasted Excel tables.</span>
         </div>
       </div>
 
@@ -149,10 +208,15 @@
     <div id="tab-compose" class="tab-pane hidden">
 
       <div class="section">
-        <label class="label">Subject line</label>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:7px;">
+          <label class="label" style="margin:0;">Subject line</label>
+          <button class="btn-sm" id="syncSubjectBtn" title="Read subject from Outlook's compose window" style="font-size:10.5px;">↻ Read from email</button>
+        </div>
         <input type="text" id="subjectInput" class="input"
           placeholder="Hi {{first_name}}, update from {{company}}" />
-        <p class="hint" style="margin-top:4px;">Use <code>{{first_name}}</code> or any <code>{{column_name}}</code> from your CSV to personalise each email.</p>
+        <p class="hint" style="margin-top:6px;">
+          💡 Type your subject in Outlook's <strong>Add a subject</strong> field and it will appear here automatically — or type it here and it updates there. Use <code>{{first_name}}</code> or any <code>{{column_name}}</code> to personalise each email.
+        </p>
         <details class="hint-advanced">
           <summary class="hint-advanced-toggle">Advanced tokens &amp; filters</summary>
           <div class="hint hint-advanced-body">
@@ -169,20 +233,49 @@
           <button id="insertFieldBtn">Insert into body</button>
         </div>
 
-        <!-- Tag insertion -->
+        <!-- ── Personalisation tag bar ──────────────────────────────
+             Clicking a chip inserts its data-tag value into the
+             email body OR the subject line depending on which input
+             was most recently focused (tracked via mousedown snapshot
+             in JS — see _subjectWasFocused in taskpane.js).
+
+             Default chips (below) are in DEFAULT_TAGS[] in JS and do
+             NOT get a remove button. CSV-column tags and user-added
+             custom tags are injected by addTagToBar() and DO get a
+             ✕ remove button via the .tag-remove-btn pattern.
+
+             .tag-smart chips are computed (not column values) and
+             also don't get a remove button.
+             ──────────────────────────────────────────────────────── -->
         <div class="tags-header">
           <span class="label" style="margin:0;">Personalisation tags</span>
-          <span class="tags-hint">👆 Click any tag to insert it into your email</span>
+          <!-- Toggle: controls whether clicking a tag inserts into the email
+               body (via setSelectedDataAsync) or the Outlook native subject
+               (via subject.getAsync + setAsync). JS reads data-target on the
+               active button to determine the insert path in insertTag(). -->
+          <div class="tag-target-toggle" role="group" aria-label="Tag insert target">
+            <button class="tag-target-btn active" id="targetBodyBtn"    data-target="body"    title="Insert tags at cursor in the email body">Body</button>
+            <button class="tag-target-btn"         id="targetSubjectBtn" data-target="subject" title="Append tags to the email subject line">Subject</button>
+          </div>
         </div>
+
+        <!-- #tagBar — the chip container. JS dynamically appends CSV-column
+             chips and custom chips here after the default chips below.
+             Default (built-in) chips: plain column name placeholders.
+             Smart chips (.tag-smart): computed values like today's date. -->
         <div id="tagBar" class="tag-bar">
-          <span class="tag" data-tag="{{first_name}}" tabindex="0" role="button" aria-label="Insert first_name token">{{first_name}}</span>
-          <span class="tag" data-tag="{{last_name}}" tabindex="0" role="button" aria-label="Insert last_name token">{{last_name}}</span>
-          <span class="tag" data-tag="{{email}}" tabindex="0" role="button" aria-label="Insert email token">{{email}}</span>
-          <span class="tag" data-tag="{{company}}" tabindex="0" role="button" aria-label="Insert company token">{{company}}</span>
-          <span class="tag" data-tag="{{title}}" tabindex="0" role="button" aria-label="Insert title token">{{title}}</span>
-          <span class="tag tag-smart" data-tag="{{greeting_line}}" tabindex="0" role="button" aria-label="Insert greeting_line token">{{greeting_line}}</span>
-          <span class="tag tag-smart" data-tag="{{today}}" tabindex="0" role="button" aria-label="Insert today token">{{today}}</span>
-          <span class="tag tag-smart" data-tag="{{now}}" tabindex="0" role="button" aria-label="Insert now token">{{now}}</span>
+          <!-- Default column-name chips — listed in DEFAULT_TAGS[] in JS.
+               These are never removable. Each chip contains a .tag-label
+               span so the inner structure matches JS-generated chips. -->
+          <span class="tag" data-tag="{{first_name}}" tabindex="0" role="button" aria-label="Insert first_name token"><span class="tag-label">{{first_name}}</span></span>
+          <span class="tag" data-tag="{{last_name}}"  tabindex="0" role="button" aria-label="Insert last_name token"><span class="tag-label">{{last_name}}</span></span>
+          <span class="tag" data-tag="{{email}}"      tabindex="0" role="button" aria-label="Insert email token"><span class="tag-label">{{email}}</span></span>
+          <span class="tag" data-tag="{{company}}"    tabindex="0" role="button" aria-label="Insert company token"><span class="tag-label">{{company}}</span></span>
+          <span class="tag" data-tag="{{title}}"      tabindex="0" role="button" aria-label="Insert title token"><span class="tag-label">{{title}}</span></span>
+          <!-- Smart computed tags — green palette (.tag-smart) -->
+          <span class="tag tag-smart" data-tag="{{greeting_line}}" tabindex="0" role="button" aria-label="Insert greeting_line token"><span class="tag-label">{{greeting_line}}</span></span>
+          <span class="tag tag-smart" data-tag="{{today}}"         tabindex="0" role="button" aria-label="Insert today token"><span class="tag-label">{{today}}</span></span>
+          <span class="tag tag-smart" data-tag="{{now}}"           tabindex="0" role="button" aria-label="Insert now token"><span class="tag-label">{{now}}</span></span>
         </div>
 
         <!-- Advanced: greeting format + custom tags (collapsed) -->
@@ -346,8 +439,16 @@
             <button class="btn-secondary" id="clearSendHistoryBtn" style="margin-top:6px;font-size:11px;">🗑 Clear send history</button>
             <p class="hint">Clears the 30-day duplicate send guard history.</p>
 
-            <label class="label" style="margin-top:8px;">Batch delay <span id="batchDelayLabel" class="hint-inline">(1.5 s between batches)</span></label>
-            <input type="range" id="batchDelayInput" min="0" max="10" step="0.5" value="1.5" class="range-input" />
+            <!-- Batch delay: replaced range slider with a number input for precision.
+                 The JS event listener reads .value as parseFloat() so it works
+                 identically with either input type — no JS changes required.
+                 width:70px keeps the number field compact next to the label. -->
+            <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+              <label class="label" style="margin:0;">Batch delay</label>
+              <input type="number" id="batchDelayInput" min="0" max="10" step="0.5" value="1.5"
+                class="input" style="width:70px;padding:4px 8px;font-size:12px;" />
+              <span id="batchDelayLabel" class="hint-inline">seconds between batches</span>
+            </div>
 
             <div class="opts-row" style="margin-top:6px;">
               <label>Send delay jitter:
@@ -398,7 +499,7 @@
           <img src="assets/icon-color.png" alt="Mail Merge icon" class="about-icon" />
           <div class="about-meta">
             <div class="about-app-name">Mail Merge</div>
-            <div class="about-version-badge">v2.5.0</div>
+            <div class="about-version-badge">v2.6.0</div>
           </div>
         </div>
         <p class="about-tagline">Classic Mail Merge Engine for New Outlook</p>
@@ -416,9 +517,20 @@
 
   </div><!-- /tab-content-wrap -->
 
-  <!-- Sticky app footer -->
+  <!-- ── Sticky app footer ──────────────────────────────────────────
+       position: sticky; bottom: 0 in CSS keeps this anchored to the
+       bottom of the viewport regardless of scroll position.
+       All child elements that should always be visible belong here.
+       The .footer-disclosure <details> also lives here (as the last
+       child) so it expands UPWARD into the footer rather than causing
+       overlap by rendering below the sticky bar.
+       ─────────────────────────────────────────────────────────── -->
   <div class="app-footer">
-    <!-- Progress bar (hidden until merge runs) -->
+
+    <!-- Progress bar — hidden (.hidden class) until a merge starts.
+         JS removes .hidden and updates #progressFill width% and
+         #progressLabel text as emails are dispatched.
+         ARIA progressbar role + aria-valuenow make this accessible. -->
     <div id="progressContainer" class="progress-container hidden" style="margin-bottom:6px;">
       <div id="progressFill" class="progress-fill"
            role="progressbar"
@@ -429,33 +541,66 @@
       <span id="progressLabel" class="progress-label">0%</span>
     </div>
 
-    <!-- Action buttons row -->
-    <div class="merge-actions">
-      <select id="testRowSelect" title="Row to use for test send" style="font-size:11px;padding:2px 4px;max-width:130px;border:1px solid #c8c6c4;border-radius:3px;background:#faf9f8;color:#323130;font-family:inherit;">
-        <option value="0">Row 1 (default)</option>
+    <!-- Step 1 — test send strip (always visible in footer).
+         Orange-branded row encouraging users to send a test email
+         to themselves before running the full merge. The <select>
+         lets them pick which recipient row to use for the test. -->
+    <div class="footer-step1-row">
+      <span class="step1-label">Step 1 — Test first</span>
+      <select id="testRowSelect" title="Row to use for test send" class="step1-row-select">
+        <option value="0">Row 1</option>
       </select>
-      <button id="testSendBtn" class="btn-secondary">&#128232; Test</button>
-      <button id="previewAllBtn" class="btn-preview">&#128065; Preview</button>
-      <button id="simulateBtn" class="btn-secondary" title="Run merge without sending — download per-recipient preview as CSV">Simulate</button>
-      <button id="saveDraftsBtn" class="btn-secondary">📝 Drafts</button>
-      <button id="broadcastBtn" class="btn-secondary">📢 Broadcast</button>
-      <button id="mergeBtn" class="btn-primary">▶ Run mail merge</button>
-      <button id="stopBtn" class="btn-danger hidden">⏹ Stop</button>
+      <button id="testSendBtn" class="btn-step1">📨 Send test to myself</button>
     </div>
 
-    <!-- Retry / report (hidden until needed) -->
+    <!-- Action buttons — split into two explicit sub-rows to prevent
+         wrapping in the narrow ~320px taskpane viewport.
+         Row 1 (.merge-actions-secondary): 4 equal-width utility buttons
+         Row 2 (.merge-actions-primary):   full-width CTA + optional Stop
+         CSS (.merge-actions) stacks them vertically with a column layout. -->
+    <div class="merge-actions">
+
+      <!-- Secondary actions row: Preview / Simulate / Drafts / Broadcast.
+           All four share the row width equally via flex:1 on each button. -->
+      <div class="merge-actions-row merge-actions-secondary">
+        <button id="previewAllBtn" class="btn-preview">&#128065; Preview</button>
+        <button id="simulateBtn" class="btn-secondary"
+                title="Run merge without sending — download per-recipient preview as CSV">Simulate</button>
+        <button id="saveDraftsBtn" class="btn-secondary">📝 Drafts</button>
+        <button id="broadcastBtn" class="btn-secondary">📢 Broadcast</button>
+      </div>
+
+      <!-- Primary action row: Run mail merge (fills width).
+           Stop button is hidden by default; JS reveals it once a merge starts
+           and hides mergeBtn, giving the user a way to abort mid-run. -->
+      <div class="merge-actions-row merge-actions-primary">
+        <button id="mergeBtn" class="btn-primary">▶ Run mail merge</button>
+        <button id="stopBtn" class="btn-danger hidden">⏹ Stop</button>
+      </div>
+
+    </div>
+
+    <!-- Retry / report buttons — both start hidden. JS shows them after
+         a merge finishes if there were failures (retryFailedBtn) or
+         always at completion (downloadReportBtn). Button text for
+         retryFailedBtn is set dynamically by JS (e.g. "Retry 3 failed"). -->
     <div style="margin-top:5px;display:flex;gap:6px;flex-wrap:wrap;">
-      <button id="retryFailedBtn" class="btn-secondary hidden"></button>
+      <button id="retryFailedBtn"    class="btn-secondary hidden"></button>
       <button id="downloadReportBtn" class="btn-secondary hidden">📊 Download report</button>
     </div>
 
-    <!-- Mini log + expand button -->
+    <!-- Mini log strip + expand toggle.
+         #footerLogMini shows the single most-recent log entry as a
+         compact dark terminal strip. "Log ↕" button toggles #fullLogArea. -->
     <div class="footer-log-row">
       <div id="footerLogMini" class="footer-log-mini"></div>
-      <button class="btn-secondary" id="toggleLogBtn" style="white-space:nowrap;font-size:11px;padding:2px 8px;">Log ↕</button>
+      <button class="btn-secondary" id="toggleLogBtn"
+              style="white-space:nowrap;font-size:11px;padding:2px 8px;">Log ↕</button>
     </div>
 
-    <!-- Full log (collapsed by default) -->
+    <!-- Full scrollable log — hidden by default, shown when user
+         clicks the "Log ↕" toggle button above. Contains the complete
+         chronological output of all send operations.               -->
     <div id="fullLogArea" class="hidden" style="margin-top:6px;">
       <div id="statusLog" class="status-log">
         <p class="log-entry log-info">Ready. Load a CSV file or paste data, then click "Run mail merge".</p>
@@ -465,7 +610,17 @@
         <button class="btn-secondary" id="downloadLogBtn">⬇ Download log</button>
       </div>
     </div>
-  </div>
+
+    <!-- Privacy disclosure — placed INSIDE .app-footer so it expands upward
+         within the sticky footer rather than appearing below it in the DOM,
+         which would cause it to render underneath the footer and overlap content.
+         The <details> element is toggled open/closed by the browser natively. -->
+    <details class="footer-disclosure">
+      <summary class="footer-disclosure-btn">🔒 Privacy &amp; data</summary>
+      <p class="footer-disclosure-body">All data is processed locally in your browser. Your subject line and CSV are saved to your browser's local storage for convenience — nothing is transmitted to or stored on GitHub Pages servers. Emails are dispatched securely via Microsoft Graph API over TLS/HTTPS on behalf of your authenticated Microsoft 365 account.</p>
+    </details>
+
+  </div><!-- /app-footer -->
 
   <!-- Preview all modal -->
   <div id="previewModal" class="modal-overlay hidden">
@@ -496,11 +651,6 @@
       </div>
     </div>
   </div>
-
-  <details class="footer-disclosure">
-    <summary class="footer-disclosure-btn">🔒 Privacy &amp; data</summary>
-    <p class="footer-disclosure-body">All data is processed locally in your browser. Your subject line and CSV are saved to your browser's local storage for convenience — nothing is transmitted to or stored on GitHub Pages servers. Emails are dispatched securely via Microsoft Graph API over TLS/HTTPS on behalf of your authenticated Microsoft 365 account.</p>
-  </details>
 
   <!-- Contacts picker modal -->
   <div id="contactsModal" class="modal-overlay hidden">
@@ -593,6 +743,6 @@
   </div>
 
   <!-- Core engine -->
-  <script src="taskpane.js?v=2.4.1" type="text/javascript"></script>
+  <script src="taskpane.js?v=2.6.0" type="text/javascript"></script>
 </body>
 </html>

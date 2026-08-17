@@ -3,33 +3,55 @@
    Modern refresh: pill buttons, smooth curves, elevated surfaces
    ═══════════════════════════════════════════════════════════════ */
 
-/* ─── CSS Custom Properties ──────────────────────────────────── */
+/* ─── CSS Custom Properties ──────────────────────────────────────
+   All design tokens live here as CSS variables so they can be
+   referenced anywhere in the stylesheet. Changing a value here
+   updates every element that uses it — no need to hunt through
+   individual rules.
+   ─────────────────────────────────────────────────────────────── */
 :root {
-  /* ── Colour style ────────────────────────────────── */
+  /* ── Brand colours (Promethean IT orange palette) ─────────
+     Used for CTAs, accents, and the test-send "Step 1" strip.
+     --brand-orange-glow drives box-shadow on orange buttons.   */
   --brand-orange:      #F58220;
   --brand-orange-dark: #D96610;
   --brand-orange-glow: rgba(245,130,32,0.35);
-  --brand-black:       #1C1C1E;
-  --brand-black-hover: #2E2E30;
+  --brand-black:       #1C1C1E;   /* used for dark overlays */
+  --brand-black-hover: #2E2E30;   /* slightly lighter hover state */
 
-  /* ── Accent (purple UI chrome) ─────────────────── */
+  /* ── Accent (purple UI chrome) ───────────────────────────
+     The main interactive colour: links, active tabs, focus
+     rings, accent buttons, and selected states.
+     --accent-bg / --accent-border are used for subtle tinted
+     container backgrounds and borders.                        */
   --accent:        #5B52C8;
-  --accent-dark:   #4238AE;
-  --accent-light:  #8078D8;
-  --accent-bg:     #EEECFF;
-  --accent-border: #CCC8F5;
+  --accent-dark:   #4238AE;   /* pressed/hover state */
+  --accent-light:  #8078D8;   /* lighter tint for decorative use */
+  --accent-bg:     #EEECFF;   /* very light purple tint — hover backgrounds */
+  --accent-border: #CCC8F5;   /* soft purple border for accent containers */
 
+  /* ── Surface & background ────────────────────────────────
+     --surface      : pure white card/panel backgrounds
+     --surface-raised: slightly off-white for elevated elements
+     --bg           : the page-level lavender-grey wash
+     --bg-hover     : slightly more saturated version used on hover */
   --surface:       #FFFFFF;
   --surface-raised:#FAFAFA;
   --bg:            #F3F2FB;
   --bg-hover:      #ECEAFF;
 
-  --text:          #1F1D3A;
-  --text-secondary:#5A5880;
-  --text-muted:    #908DB8;
-  --border:        #E0DDEF;
-  --border-light:  #ECEAFF;
+  /* ── Typography colours ──────────────────────────────────
+     Three levels of text contrast for primary / secondary /
+     muted (hint, placeholder, timestamp) content.             */
+  --text:          #1F1D3A;   /* near-black — primary body text */
+  --text-secondary:#5A5880;   /* medium grey-purple — labels, captions */
+  --text-muted:    #908DB8;   /* light purple — hints, placeholders */
+  --border:        #E0DDEF;   /* standard divider / input border colour */
+  --border-light:  #ECEAFF;   /* extra-light border for nested containers */
 
+  /* ── Semantic status colours ─────────────────────────────
+     Each semantic state has a foreground colour for text/icons
+     and a --*-bg for tinted container backgrounds.            */
   --success:       #1A7F4B;
   --success-bg:    #E6F7EE;
   --warning:       #9A5800;
@@ -37,140 +59,207 @@
   --danger:        #C4252A;
   --danger-bg:     #FDE8E8;
 
-  /* ── Radii — smooth & modern ───────────────────── */
-  --radius-sm:     10px;
-  --radius:        16px;
-  --radius-lg:     22px;
+  /* ── Border radii — smooth & modern ─────────────────────
+     Three sizes let us match radius to component importance.
+     Pill buttons use 99px (a value so large it always rounds). */
+  --radius-sm:     10px;   /* small cards, badges, inputs */
+  --radius:        16px;   /* standard cards, panels */
+  --radius-lg:     22px;   /* large modal / sheet surfaces */
 
-  /* ── Shadows ───────────────────────────────────── */
+  /* ── Elevation shadows (purple-tinted) ──────────────────
+     Each level adds a spread + offset to convey z-height.
+     The purple tint ties shadows to the brand palette.         */
   --shadow-sm:     0 2px 8px rgba(83,74,183,0.09), 0 1px 3px rgba(0,0,0,0.04);
   --shadow:        0 4px 16px rgba(83,74,183,0.13), 0 1px 4px rgba(0,0,0,0.06);
   --shadow-lg:     0 10px 32px rgba(83,74,183,0.18), 0 2px 8px rgba(0,0,0,0.08);
 
+  /* ── Motion ──────────────────────────────────────────────
+     All interactive transitions share the same duration and
+     easing curve so the UI feels consistently snappy.
+     cubic-bezier(0.4,0,0.2,1) is the Material "standard" curve
+     — fast out, gentle deceleration at rest.                  */
   --transition:    160ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* ─── Reset ──────────────────────────────────────────────────── */
+/* ─── Reset ──────────────────────────────────────────────────────
+   Remove browser-default margin/padding from every element and
+   its pseudo-elements. box-sizing: border-box means padding and
+   border are included inside the declared width/height, which
+   makes layout arithmetic predictable.
+   ─────────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* ── Swipe-back guard ─────────────────────────────────────────
+   Prevents the macOS/Chrome horizontal swipe-to-navigate gesture
+   from firing when the user scrolls inside the taskpane panel.
+   overscroll-behavior-x: none stops the browser from consuming
+   horizontal overscroll as a navigation signal.
+   ─────────────────────────────────────────────────────────── */
+html {
+  overscroll-behavior-x: none;
+}
+
+/* Make both html and body fill the full viewport height so the
+   flex-column layout inside body can push the sticky footer to
+   the bottom even when the content is short.                    */
 html, body { height: 100%; }
 
 body {
+  /* Office taskpane font stack: Segoe UI first (Windows/Outlook),
+     then system-ui / -apple-system as fallbacks on macOS.      */
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   font-size: 13px;
   line-height: 1.5;
   background: var(--bg);
   color: var(--text);
+  /* Column flex so the scrollable content area and sticky footer
+     stack vertically and footer always stays at the bottom.     */
   display: flex;
   flex-direction: column;
   min-height: 100%;
-  -webkit-font-smoothing: antialiased;
+  -webkit-font-smoothing: antialiased;  /* crisper text on Retina/HiDPI screens */
+  /* Block horizontal overscroll at body level too (belt-and-suspenders
+     alongside the same rule on html — needed in some Chrome versions) */
+  overscroll-behavior-x: none;
 }
 
-/* ─── Header ─────────────────────────────────────────────────── */
+/* ─── Header ─────────────────────────────────────────────────────
+   Top-of-pane branding bar. Always visible — flex-shrink: 0 prevents
+   it from collapsing when the content area overflows and scrolls.
+   ─────────────────────────────────────────────────────────────── */
 .header {
+  /* 3-stop purple gradient matching the accent palette */
   background: linear-gradient(135deg, #6C62D4 0%, #534AB7 45%, #3D35A0 100%);
   color: #fff;
-  padding: 12px 16px 12px 14px;
+  padding: 12px 16px 12px 14px;  /* slightly less left-padding to optically align with icon */
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-shrink: 0;
-  box-shadow: 0 3px 12px rgba(61,53,160,0.32);
+  flex-shrink: 0;                  /* never squish the header vertically */
+  box-shadow: 0 3px 12px rgba(61,53,160,0.32);  /* purple drop-shadow below header */
 }
 
+/* Square pill wrapper for the app logo — frosted-glass look via
+   semi-transparent white background so logo pops on the gradient */
 .header-icon {
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  overflow: hidden;
-  flex-shrink: 0;
+  overflow: hidden;   /* clip the <img> to the rounded corners */
+  flex-shrink: 0;     /* never let the icon compress */
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255,255,255,0.18);
-  box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+  background: rgba(255,255,255,0.18);          /* frosted tint */
+  box-shadow: 0 1px 4px rgba(0,0,0,0.18);     /* subtle lift */
 }
 
 .header-icon img {
   width: 28px;
   height: 28px;
-  border-radius: 8px;
+  border-radius: 8px;  /* match wrapper radius so no square corners bleed through */
 }
 
 .header-title {
   font-size: 14px;
   font-weight: 700;
-  letter-spacing: -0.01em;
-  flex: 1;
+  letter-spacing: -0.01em;  /* tight tracking looks more modern at this size */
+  flex: 1;                   /* consume remaining space, pushing any trailing actions right */
 }
 
-/* ─── Tab Bar ────────────────────────────────────────────────── */
+/* ─── Tab Bar ─────────────────────────────────────────────────────
+   The tab bar sits below the header and remains sticky at the top
+   of the scroll container (z-index: 20 keeps it above scrolled
+   content). position: sticky + top: 0 means it pins once the header
+   scrolls out of view.
+   ─────────────────────────────────────────────────────────────── */
 .tab-bar {
   display: flex;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  position: sticky;
+  position: sticky;  /* sticks to top of .tab-content-wrap viewport */
   top: 0;
-  z-index: 20;
-  flex-shrink: 0;
-  padding: 6px 8px 0;
+  z-index: 20;       /* above card content that scrolls underneath it */
+  flex-shrink: 0;    /* never compress the tab bar height */
+  padding: 6px 8px 0;  /* top/side padding; no bottom so active underline aligns with border */
   gap: 3px;
 }
 
+/* Individual tab button — each gets an equal flex share of the bar width.
+   The 2px bottom border acts as the active indicator; it's transparent
+   by default and set to --accent when .active is toggled by JS.          */
 .tab-btn {
   flex: 1;
   padding: 7px 4px 6px;
   background: none;
   border: none;
-  border-bottom: 2px solid transparent;
+  border-bottom: 2px solid transparent;  /* placeholder for the active indicator */
   font-size: 11.5px;
   font-weight: 500;
   font-family: inherit;
   color: var(--text-muted);
   cursor: pointer;
   transition: color var(--transition), border-color var(--transition), background var(--transition);
-  border-radius: 10px 10px 0 0;
+  border-radius: 10px 10px 0 0;  /* only round top corners so bottom edge is flush with bar border */
 }
 
 .tab-btn:hover {
   color: var(--accent);
-  background: var(--accent-bg);
+  background: var(--accent-bg);  /* light tint signals interactivity */
 }
 
+/* Active tab: blue underline + bold weight + tinted background */
 .tab-btn.active {
   color: var(--accent);
-  border-bottom-color: var(--accent);
+  border-bottom-color: var(--accent);  /* the active indicator line */
   font-weight: 700;
   background: var(--accent-bg);
 }
 
-/* ─── Tab Content ────────────────────────────────────────────── */
+/* ─── Tab Content ─────────────────────────────────────────────────
+   .tab-content-wrap is the scrollable viewport between the sticky
+   tab bar and the sticky footer. flex: 1 makes it expand to fill all
+   remaining vertical space; overflow-y: auto adds a scrollbar only
+   when the content is taller than the available height.
+   ─────────────────────────────────────────────────────────────── */
 .tab-content-wrap {
-  flex: 1;
-  overflow-y: auto;
+  flex: 1;          /* grow to fill the flex-column body, pushing footer down */
+  overflow-y: auto; /* scroll when content overflows the viewport height */
 }
 
+/* Each individual tab panel; padding creates breathing room around
+   the stacked section cards inside each tab.                        */
 .tab-pane { padding: 12px 0 14px; }
 
-/* ─── Section Cards ──────────────────────────────────────────── */
+/* ─── Section Cards ───────────────────────────────────────────────
+   Each logical group of controls lives in a .section card with a
+   white surface, a subtle border, generous padding, and a soft
+   shadow — gives the UI an elevated, layered feel.
+   margin: 0 10px 10px provides the gutters between cards and the
+   pane edges.
+   ─────────────────────────────────────────────────────────────── */
 .section {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px 16px;
-  margin: 0 10px 10px;
+  margin: 0 10px 10px;  /* 10px horizontal gutter, 10px gap between stacked sections */
   box-shadow: var(--shadow-sm);
 }
 
-/* ─── Typography ─────────────────────────────────────────────── */
+/* ─── Typography helpers ──────────────────────────────────────────
+   .label  — all-caps field label above inputs (like an HTML <label>)
+   .sublabel — mixed-case secondary label for sub-groups
+   .hint   — small muted instructional text below an input
+   .hint-inline — same size/colour but inline (no block margin)
+   ─────────────────────────────────────────────────────────────── */
 .label {
-  display: block;
+  display: block;          /* force onto its own line above the input */
   font-weight: 700;
   font-size: 11px;
   color: var(--text-secondary);
   margin-bottom: 7px;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.05em;  /* open tracking makes small all-caps legible */
   text-transform: uppercase;
 }
 
@@ -190,31 +279,41 @@ body {
 
 .hint-inline {
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--text-muted);  /* used for things like "(1.5 s between batches)" next to a label */
 }
 
-/* ─── Inputs ─────────────────────────────────────────────────── */
+/* ─── Inputs ──────────────────────────────────────────────────────
+   .input        — full-width text / number input
+   .input-inline — inline variant used inside flex rows (inherits flex grow)
+   .select-inline — compact <select> used inside flex rows
+   Both have matching border, radius, and focus ring styles.
+   ─────────────────────────────────────────────────────────────── */
 .input {
   width: 100%;
   padding: 8px 12px;
   border: 1.5px solid var(--border);
   border-radius: var(--radius-sm);
   font-size: 12.5px;
-  font-family: inherit;
+  font-family: inherit;  /* prevents browser from defaulting to serif in some OS settings */
   color: var(--text);
   background: var(--surface-raised);
   transition: border-color var(--transition), box-shadow var(--transition);
 }
 
+/* Focus ring: accent-coloured border + translucent ring so keyboard
+   focus is obvious without relying on the default blue outline.    */
 .input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(91,82,200,0.13);
-  background: var(--surface);
+  box-shadow: 0 0 0 3px rgba(91,82,200,0.13);  /* 13% opacity purple halo */
+  background: var(--surface);  /* pure white when focused for contrast */
 }
 
+/* Inline input variant: grows in a flex row, monospace for code-like values
+   such as a template variable or a tag expression.                */
 .input-inline { flex: 1; font-family: monospace; }
 
+/* Compact <select> — used in rows where space is shared with other controls */
 .select-inline {
   padding: 6px 10px;
   border: 1.5px solid var(--border);
@@ -233,7 +332,11 @@ body {
   box-shadow: 0 0 0 3px rgba(91,82,200,0.13);
 }
 
-/* ─── CSV Textarea ───────────────────────────────────────────── */
+/* ─── CSV Textarea ────────────────────────────────────────────────
+   The main paste/type area for recipient CSV data. Uses a monospace
+   font so columns align visually. height: 110px is the starting
+   height; resize: vertical lets users drag it taller if needed.
+   ─────────────────────────────────────────────────────────────── */
 .csv-area {
   width: 100%;
   height: 110px;
@@ -241,11 +344,11 @@ body {
   border: 1.5px solid var(--border);
   border-radius: var(--radius-sm);
   font-size: 11.5px;
-  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;  /* code-like font for CSV clarity */
   color: var(--text);
   background: var(--surface-raised);
-  resize: vertical;
-  line-height: 1.6;
+  resize: vertical;   /* allow user to manually resize height only, not width */
+  line-height: 1.6;   /* extra line-height makes rows of CSV easy to scan */
   transition: border-color var(--transition), box-shadow var(--transition);
 }
 
@@ -253,43 +356,56 @@ body {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(91,82,200,0.13);
-  background: var(--surface);
+  background: var(--surface);  /* pure white when editing for maximum contrast */
 }
 
-/* ─── Buttons ────────────────────────────────────────────────── */
+/* ─── Buttons ─────────────────────────────────────────────────────
+   All buttons are pill-shaped (border-radius: 99px) and use
+   translateY(-1px) on hover to convey a "lift" effect.
+   There are five button variants:
+     .btn-primary   — full-width orange CTA (Run mail merge)
+     .btn-preview   — charcoal, turns orange on hover (Preview)
+     .btn-secondary — lavender outline, turns orange on hover (utility actions)
+     .btn-danger    — red (Stop, destructive actions)
+     .btn-sm        — compact utility pill (Add, Remove, etc.)
+     .btn-icon      — bare icon-only button (e.g. delete row)
+   ─────────────────────────────────────────────────────────────── */
 
-/* Primary — orange brand colour, full pill */
+/* Primary — orange brand gradient, full pill.
+   width: 100% makes it span its container (overridden inside
+   .merge-actions-primary where flex: 1 controls it instead).    */
 .btn-primary {
   width: 100%;
   padding: 11px 16px;
   background: linear-gradient(135deg, var(--brand-orange) 0%, var(--brand-orange-dark) 100%);
   color: #fff;
   border: none;
-  border-radius: 99px;
+  border-radius: 99px;  /* fully round ends (pill shape) */
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
   font-family: inherit;
   letter-spacing: 0.02em;
-  box-shadow: 0 3px 12px var(--brand-orange-glow);
+  box-shadow: 0 3px 12px var(--brand-orange-glow);  /* warm orange glow beneath button */
   transition: background var(--transition), box-shadow var(--transition), transform var(--transition);
 }
 
 .btn-primary:hover {
-  background: linear-gradient(135deg, #FF9030 0%, #E87018 100%);
-  box-shadow: 0 5px 18px var(--brand-orange-glow);
-  transform: translateY(-1px);
+  background: linear-gradient(135deg, #FF9030 0%, #E87018 100%);  /* slightly lighter orange */
+  box-shadow: 0 5px 18px var(--brand-orange-glow);  /* larger glow on hover */
+  transform: translateY(-1px);  /* lift effect */
 }
 
-.btn-primary:active { transform: translateY(0); }
+.btn-primary:active { transform: translateY(0); }  /* snap back on click */
 .btn-primary:disabled {
-  background: #C8C6C4;
+  background: #C8C6C4;   /* neutral grey — visually "off" */
   box-shadow: none;
   transform: none;
   cursor: not-allowed;
 }
 
-/* Preview — charcoal pill, turns orange on hover */
+/* Preview — charcoal/black gradient pill at rest, morphs to orange
+   on hover so it visually connects to the brand identity.          */
 .btn-preview {
   padding: 7px 16px;
   background: linear-gradient(135deg, #3A3A3C 0%, #1C1C1E 100%);
@@ -303,7 +419,7 @@ body {
   letter-spacing: 0.01em;
   box-shadow: 0 2px 8px rgba(0,0,0,0.24);
   transition: background var(--transition), box-shadow var(--transition), transform var(--transition);
-  white-space: nowrap;
+  white-space: nowrap;  /* label must never wrap inside the pill */
 }
 
 .btn-preview:hover {
@@ -315,10 +431,11 @@ body {
 .btn-preview:active { transform: translateY(0); }
 .btn-preview:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* Secondary — soft lavender pill, warm orange hover */
+/* Secondary — soft lavender pill with purple border at rest.
+   On hover transitions to warm orange tones to suggest action.   */
 .btn-secondary {
   padding: 7px 14px;
-  background: linear-gradient(180deg, #F5F3FF 0%, #ECEAFF 100%);
+  background: linear-gradient(180deg, #F5F3FF 0%, #ECEAFF 100%);  /* light purple gradient */
   color: var(--accent-dark);
   border: 1.5px solid var(--accent-border);
   border-radius: 99px;
@@ -332,8 +449,8 @@ body {
 }
 
 .btn-secondary:hover {
-  background: linear-gradient(180deg, #FFF8F0 0%, #FFE8D0 100%);
-  border-color: #F5A060;
+  background: linear-gradient(180deg, #FFF8F0 0%, #FFE8D0 100%);  /* warm cream-orange */
+  border-color: #F5A060;       /* orange border on hover */
   color: var(--brand-orange-dark);
   box-shadow: 0 3px 10px rgba(245,130,32,0.20);
   transform: translateY(-1px);
@@ -342,7 +459,8 @@ body {
 .btn-secondary:active { transform: translateY(0); }
 .btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
-/* Danger — red pill */
+/* Danger — red gradient pill for destructive/stop actions.
+   Used for the Stop button inside .merge-actions-primary.         */
 .btn-danger {
   padding: 11px 16px;
   background: linear-gradient(135deg, #E03035 0%, var(--danger) 100%);
@@ -354,17 +472,19 @@ body {
   cursor: pointer;
   font-family: inherit;
   white-space: nowrap;
-  box-shadow: 0 3px 10px rgba(196,37,42,0.28);
+  box-shadow: 0 3px 10px rgba(196,37,42,0.28);  /* red glow */
   transition: background var(--transition), box-shadow var(--transition), transform var(--transition);
 }
 
 .btn-danger:hover {
-  background: linear-gradient(135deg, #EE3540 0%, #A4262C 100%);
+  background: linear-gradient(135deg, #EE3540 0%, #A4262C 100%);  /* deeper red on hover */
   transform: translateY(-1px);
 }
 .btn-danger:active { transform: translateY(0); }
 .btn-danger:disabled { background: #C8C6C4; box-shadow: none; cursor: not-allowed; }
 
+/* Small utility pill — used for compact actions like "Add tag",
+   "Remove", or row-level controls inside tables.                  */
 .btn-sm {
   padding: 4px 12px;
   background: var(--surface);
@@ -385,6 +505,9 @@ body {
 }
 .btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* Icon-only button — no background or border at rest.
+   Used for per-row delete controls (trash / ✕ icons).
+   Turns red on hover to reinforce "destructive action".           */
 .btn-icon {
   background: none;
   border: none;
@@ -399,33 +522,42 @@ body {
 
 .btn-icon:hover { color: var(--danger); background: var(--danger-bg); }
 
-/* ─── Tags / Chips ───────────────────────────────────────────── */
+/* ─── Tags / Chips ────────────────────────────────────────────────
+   The tag bar is a wrapping flex container holding clickable chip
+   elements. Clicking a chip calls insertTag(), which inserts the
+   tag's data-tag value into either the email body or subject line
+   depending on which input had focus before the click.
+   ─────────────────────────────────────────────────────────────── */
 .tag-bar {
   display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
+  flex-wrap: wrap;  /* chips wrap to new rows when the bar is full */
+  gap: 5px;         /* even spacing between chips in all directions */
   margin-top: 6px;
 }
 
+/* Individual tag chip. Contains a .tag-label text span and,
+   for custom (non-default) tags, a .tag-remove-btn button.
+   monospace font makes the {{placeholder}} syntax look intentional.
+   user-select: none prevents accidental text selection on quick clicks. */
 .tag {
   background: var(--accent-bg);
   color: var(--accent-dark);
   font-size: 11.5px;
   font-weight: 600;
   padding: 5px 13px;
-  border-radius: 99px;
+  border-radius: 99px;              /* pill shape */
   border: 1.5px solid var(--accent-border);
   cursor: pointer;
-  font-family: monospace;
+  font-family: monospace;           /* code-style text for {{column_name}} tags */
   box-shadow: 0 1px 4px rgba(83,74,183,0.10);
   transition: background var(--transition), border-color var(--transition),
               box-shadow var(--transition), transform var(--transition), color var(--transition);
-  -webkit-tap-highlight-color: transparent;
-  user-select: none;
+  -webkit-tap-highlight-color: transparent;  /* remove mobile tap flash */
+  user-select: none;                          /* prevent text selection on click */
 }
 
 .tag:hover {
-  background: linear-gradient(135deg, #FFF0DC 0%, #FFE8C8 100%);
+  background: linear-gradient(135deg, #FFF0DC 0%, #FFE8C8 100%);  /* warm orange tint */
   border-color: var(--brand-orange);
   color: var(--brand-orange-dark);
   box-shadow: 0 3px 10px rgba(245,130,32,0.22);
@@ -437,27 +569,37 @@ body {
   box-shadow: none;
 }
 
+/* Keyboard focus ring for tag chips — uses outline instead of
+   box-shadow so it appears outside the pill border.               */
 .tag:focus {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
+/* User-added custom column tag — dashed border distinguishes these
+   from the built-in default tags; uses inherit font for normal
+   (non-monospace) label text.                                     */
 .tag-custom {
   background: var(--surface-raised);
   color: var(--text-muted);
-  border-style: dashed;
+  border-style: dashed;   /* dashed border = "user-defined, not built-in" */
   font-family: inherit;
 }
 
+/* "Smart" computed tags (e.g. {{greeting_line}}, {{today}}) use a
+   green success palette to distinguish them from column/custom tags. */
 .tag-smart {
   background: var(--success-bg);
   color: var(--success);
   border-color: #A8D5B5;
 }
 
-.tag-smart:hover { background: #D0EBDA; }
+.tag-smart:hover { background: #D0EBDA; }  /* slightly deeper green tint on hover */
 
-/* ─── Count Badge ────────────────────────────────────────────── */
+/* ─── Count Badge ─────────────────────────────────────────────────
+   Small pill showing a numeric count (e.g. "12 recipients").
+   Used next to section headers to give at-a-glance totals.
+   ─────────────────────────────────────────────────────────────── */
 .count-badge {
   font-size: 11px;
   font-weight: 600;
@@ -468,7 +610,11 @@ body {
   border: 1px solid var(--accent-border);
 }
 
-/* ─── Preview Table ──────────────────────────────────────────── */
+/* ─── Preview Table ───────────────────────────────────────────────
+   Compact table used to display a grid of recipient data (CSV rows).
+   border-collapse removes the double-border that appears when
+   adjacent td elements each have their own border.
+   ─────────────────────────────────────────────────────────────── */
 .preview-table {
   width: 100%;
   border-collapse: collapse;
@@ -476,11 +622,13 @@ body {
   margin-top: 8px;
 }
 
+/* Column headers — styled like the .label class with uppercase and
+   extra letter-spacing for small-text legibility.                 */
 .preview-table th {
   background: var(--bg);
   padding: 7px 10px;
   text-align: left;
-  border-bottom: 2px solid var(--border);
+  border-bottom: 2px solid var(--border);  /* heavier line under header row */
   font-weight: 700;
   font-size: 11px;
   color: var(--text-secondary);
@@ -494,44 +642,56 @@ body {
   color: var(--text);
 }
 
+/* Highlight the entire row on hover so users can track across columns */
 .preview-table tr:hover td { background: var(--accent-bg); }
 
-/* ─── Status Log ─────────────────────────────────────────────── */
+/* ─── Status Log ──────────────────────────────────────────────────
+   Dark terminal-style scrollable log box shown in the Sending tab
+   to display real-time send progress and errors.
+   Dark background (#12101F) + monospace + coloured log levels
+   create an "output console" aesthetic.
+   ─────────────────────────────────────────────────────────────── */
 .status-log {
   background: #12101F;
   border-radius: var(--radius-sm);
   padding: 10px 14px;
   height: 140px;
-  overflow-y: auto;
+  overflow-y: auto;                   /* scroll older messages into view */
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
   font-size: 11px;
   line-height: 1.7;
   border: 1px solid rgba(255,255,255,0.06);
 }
 
-.log-entry { margin-bottom: 1px; }
-.log-info    { color: #9D9BB8; }
-.log-success { color: #6FCF97; }
-.log-warning { color: #F2A541; }
-.log-error   { color: #F07070; }
+.log-entry { margin-bottom: 1px; }   /* tight spacing between log lines */
+/* Log level colours — traffic-light convention in a dark theme:    */
+.log-info    { color: #9D9BB8; }    /* muted grey-purple — routine info */
+.log-success { color: #6FCF97; }    /* green — successful sends */
+.log-warning { color: #F2A541; }    /* amber — partial failures or warnings */
+.log-error   { color: #F07070; }    /* red — hard errors */
 
-/* ─── Progress Bar ───────────────────────────────────────────── */
+/* ─── Progress Bar ────────────────────────────────────────────────
+   Thin animated pill that fills left-to-right as the merge runs.
+   position: relative on the container + absolute centering on the
+   label ensures the "X / Y" text is always centred over the bar.
+   overflow: hidden on the container clips the fill at the edges.
+   ─────────────────────────────────────────────────────────────── */
 .progress-container {
-  position: relative;
+  position: relative;   /* establishes positioning context for .progress-label */
   height: 18px;
-  background: var(--border-light);
+  background: var(--border-light);  /* unfilled track colour */
   border-radius: 99px;
   margin-top: 8px;
-  overflow: hidden;
+  overflow: hidden;     /* clip fill so it doesn't overflow the rounded ends */
 }
 
 .progress-fill {
   height: 100%;
   background: linear-gradient(90deg, var(--accent) 0%, var(--accent-light) 100%);
   border-radius: 99px;
-  width: 0%;
-  transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-  box-shadow: 0 0 10px rgba(91,82,200,0.42);
+  width: 0%;            /* JS updates this percentage as sends complete */
+  transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1);  /* smooth fill animation */
+  box-shadow: 0 0 10px rgba(91,82,200,0.42);              /* purple inner glow */
 }
 
 .progress-label {
@@ -546,15 +706,21 @@ body {
   pointer-events: none;
 }
 
-/* ─── CSV / Attachment Rows ──────────────────────────────────── */
+/* ─── CSV / Attachment Rows ───────────────────────────────────────
+   Controls and labels for the CSV upload section and any
+   attachment management rows that sit below the CSV area.
+   ─────────────────────────────────────────────────────────────── */
+
+/* Row containing the "Choose file" button and any filename display */
 .csv-upload-row {
   display: flex;
   align-items: center;
   gap: 7px;
   margin-bottom: 8px;
-  flex-wrap: wrap;
+  flex-wrap: wrap;  /* wrap on very narrow widths so nothing clips */
 }
 
+/* Action buttons below the CSV textarea (e.g. Clear, Download sample) */
 .csv-actions {
   display: flex;
   align-items: center;
@@ -562,6 +728,7 @@ body {
   margin-top: 8px;
 }
 
+/* Row showing a selected attachment file with its remove control */
 .attachment-row {
   display: flex;
   align-items: center;
@@ -569,23 +736,28 @@ body {
   flex-wrap: wrap;
 }
 
+/* Filename label for the attached file — truncates with ellipsis
+   if the filename is longer than the available space.              */
 .attachment-label {
   font-size: 12px;
   color: var(--text-muted);
-  font-family: monospace;
+  font-family: monospace;  /* monospace makes file paths and names easier to read */
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: nowrap;     /* keep filename on a single line */
 }
 
+/* Divider for the "Attach files" sub-section below the CSV upload row */
 .attachment-subsection {
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px solid var(--border-light);
+  border-top: 1px solid var(--border-light);  /* subtle separator line */
 }
 
 /* ─── Send Options / Merge Actions ──────────────────────────── */
+/* Outer column that stacks the "send options" (schedule, batch delay, etc.)
+   and then the merge-actions button group beneath them */
 .send-options {
   display: flex;
   flex-direction: column;
@@ -593,20 +765,75 @@ body {
   margin-bottom: 10px;
 }
 
+/* ── Merge-actions button group ──────────────────────────────
+   The taskpane is only ~320 px wide, so a single flat flex-wrap
+   row of 5 buttons causes messy, unpredictable wrapping.
+   Instead we use a COLUMN layout with two explicit sub-rows:
+     Row 1 (.merge-actions-secondary) — Preview / Simulate / Drafts / Broadcast
+     Row 2 (.merge-actions-primary)   — Run mail merge (+ Stop when running)
+   Each sub-row is its own flex row, so buttons fill their row
+   evenly without ever wrapping across rows unintentionally.
+   ─────────────────────────────────────────────────────────── */
 .merge-actions {
   display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+  flex-direction: column;  /* stack the two sub-rows vertically */
+  gap: 5px;                /* space between secondary row and primary row */
 }
 
-.merge-actions .btn-primary { flex: 1; min-width: 0; white-space: nowrap; }
-.merge-actions .btn-secondary,
-.merge-actions button { min-width: 0; white-space: nowrap; }
+/* Both sub-rows share this base: full-width flex row, no wrapping */
+.merge-actions-row {
+  display: flex;
+  gap: 5px;                /* horizontal gap between buttons within a row */
+}
 
-.send-option-field { margin-top: 10px; }
-.schedule-row      { margin-top: 6px; }
+/* ── Secondary actions row (Preview, Simulate, Drafts, Broadcast) ──
+   Four buttons in a ~320px pane can't share a single line without
+   truncation. We let the row wrap so the 4 buttons form a 2×2 grid:
+     [ Preview ]  [ Simulate ]
+     [ Drafts  ]  [ Broadcast]
+   flex: 1 1 calc(50% - 3px) means each button wants half the row
+   minus half the gap (5px / 2 ≈ 3px), so exactly two fit per line.
+   ─────────────────────────────────────────────────────────── */
+.merge-actions-secondary {
+  flex-wrap: wrap;              /* allow buttons to spill onto a second line */
+}
 
-/* ─── Checkboxes ─────────────────────────────────────────────── */
+.merge-actions-secondary button {
+  flex: 1 1 calc(50% - 3px);   /* two buttons per row, accounting for the gap */
+  min-width: 0;                 /* allow shrinking below natural content width */
+  white-space: nowrap;          /* keep each label on one line inside the button */
+  overflow: hidden;             /* clip if somehow still too long */
+  text-overflow: ellipsis;
+  font-size: 11px;
+  padding: 7px 6px;
+}
+
+/* ── Primary action row (Run mail merge, optional Stop) ──────
+   The main CTA button fills all remaining width.
+   Stop button is hidden by default (toggled via JS) and should
+   NOT stretch — it sits beside the main button at its natural size.
+   ─────────────────────────────────────────────────────────── */
+.merge-actions-primary .btn-primary {
+  flex: 1;          /* expand to fill the row */
+  min-width: 0;     /* allow shrinking if Stop is visible */
+  white-space: nowrap;
+}
+
+.merge-actions-primary .btn-danger {
+  min-width: 0;     /* allow shrinking */
+  white-space: nowrap;
+  flex-shrink: 0;   /* don't compress the Stop button */
+}
+
+.send-option-field { margin-top: 10px; }  /* spacing above each optional send-option block */
+.schedule-row      { margin-top: 6px; }   /* spacing above the inline schedule date/time row */
+
+/* ─── Checkboxes ──────────────────────────────────────────────────
+   Flex row wrapping the <input type="checkbox"> and its sibling
+   label text. Clicking anywhere in .checkbox-label toggles the
+   checkbox (the <label> wraps both). user-select: none prevents
+   highlighting the label text when double-clicking.
+   ─────────────────────────────────────────────────────────────── */
 .checkbox-label {
   display: flex;
   align-items: center;
@@ -614,16 +841,17 @@ body {
   font-size: 12px;
   color: var(--text);
   cursor: pointer;
-  user-select: none;
+  user-select: none;  /* prevent accidental text selection on click */
 }
 
 .checkbox-label input[type="checkbox"] {
   width: 15px;
   height: 15px;
   cursor: pointer;
-  accent-color: var(--accent);
+  accent-color: var(--accent);  /* tints the checkbox tick in the brand accent colour */
 }
 
+/* Toggle variant (used for on/off settings, e.g. CC myself) */
 .toggle-label {
   display: flex;
   align-items: center;
@@ -632,27 +860,26 @@ body {
   cursor: pointer;
 }
 
-/* ─── Importance Row ─────────────────────────────────────────── */
+/* ─── Importance Row ──────────────────────────────────────────────
+   Inline row for the email importance (Low / Normal / High) select.
+   ─────────────────────────────────────────────────────────────── */
 .importance-row { display: flex; align-items: center; gap: 8px; }
 .importance-label { font-size: 12px; color: var(--text); }
 
-/* ─── Range Slider ───────────────────────────────────────────── */
-.range-input {
-  width: 100%;
-  accent-color: var(--accent);
-  margin-top: 4px;
-  cursor: pointer;
-}
-
-/* ─── Accordion ──────────────────────────────────────────────── */
+/* ─── Accordion ───────────────────────────────────────────────────
+   Collapsible sections (e.g. "Advanced options"). overflow: hidden
+   on the wrapper clips the animated height change smoothly.
+   JS toggles the .open class on .accordion-hdr when clicked.
+   ─────────────────────────────────────────────────────────────── */
 .accordion {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   margin-top: 8px;
-  overflow: hidden;
+  overflow: hidden;    /* clip body when collapsed — prevents layout bleed */
   box-shadow: var(--shadow-sm);
 }
 
+/* Accordion header button — full-width, left-aligned, styled as a row */
 .accordion-hdr {
   width: 100%;
   background: var(--surface-raised);
@@ -664,15 +891,17 @@ body {
   color: var(--text);
   cursor: pointer;
   display: flex;
-  justify-content: space-between;
+  justify-content: space-between;  /* push chevron to the right edge */
   align-items: center;
   font-family: inherit;
   transition: background var(--transition);
 }
 
 .accordion-hdr:hover { background: var(--accent-bg); color: var(--accent); }
-.accordion-hdr.open  { color: var(--accent); }
+.accordion-hdr.open  { color: var(--accent); }  /* stays accent-coloured when expanded */
 
+/* Rotating chevron (›) indicates expand/collapse state.
+   JS adds/removes .open on the parent .accordion-hdr.            */
 .accordion-chevron {
   font-size: 13px;
   transition: transform var(--transition);
@@ -688,28 +917,43 @@ body {
   border-top: 1px solid var(--border);
 }
 
-/* ─── 2-Column Options Grid ──────────────────────────────────── */
+/* ─── 2-Column Options Grid ───────────────────────────────────────
+   Used in the Advanced tab to lay out pairs of checkboxes in two
+   columns, making better use of horizontal space than a single
+   vertical list.
+   ─────────────────────────────────────────────────────────────── */
 .opts-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 7px 12px;
+  grid-template-columns: 1fr 1fr;  /* equal two-column layout */
+  gap: 7px 12px;                    /* row-gap / column-gap */
 }
 
-.opts-grid .checkbox-label { font-size: 11.5px; }
-.opts-row { margin-bottom: 4px; }
+.opts-grid .checkbox-label { font-size: 11.5px; }  /* slightly smaller in the dense grid */
+.opts-row { margin-bottom: 4px; }  /* adds a bit of vertical breathing room */
 
-/* ─── Sending Window / Rate Limit ────────────────────────────── */
+/* ─── Sending Window / Rate Limit ────────────────────────────────
+   Inline flex rows for the "sending window" time pickers and the
+   rate limit controls. flex-wrap ensures they stack gracefully on
+   very narrow widths.
+   ─────────────────────────────────────────────────────────────── */
 #sendingWindowRow,
 #rateLimitRow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 
-/* ─── Custom Tag Row ─────────────────────────────────────────── */
+/* ─── Custom Tag Row ──────────────────────────────────────────────
+   Flex row containing the "Custom tag name" text input and the
+   "Add" button so they sit side-by-side on one line.
+   ─────────────────────────────────────────────────────────────── */
 .custom-tag-row {
   display: flex;
   gap: 6px;
   margin-top: 8px;
 }
 
-/* ─── Getting Started Banner ─────────────────────────────────── */
+/* ─── Getting Started Banner ──────────────────────────────────────
+   Shown on first run (before a CSV is loaded) to guide the user
+   through the three-step setup. Purple gradient background ties it
+   to the brand without being as heavy as a card with a solid border.
+   ─────────────────────────────────────────────────────────────── */
 .getting-started-banner {
   background: linear-gradient(140deg, #EDE9FF 0%, #E4DFFF 50%, #EBE6FF 100%);
   border: 1px solid var(--accent-border);
@@ -721,12 +965,16 @@ body {
   box-shadow: var(--shadow-sm);
 }
 
+/* The numbered step list inside the banner */
 .getting-started-banner ol {
-  margin: 6px 0 10px 18px;
+  margin: 6px 0 10px 18px;  /* left-indent to show numbers */
   padding: 0;
 }
 
-/* ─── Preview Paging ─────────────────────────────────────────── */
+/* ─── Preview Paging ──────────────────────────────────────────────
+   Prev / counter / Next controls at the bottom of the per-recipient
+   preview modal. The counter text sits centred between the buttons.
+   ─────────────────────────────────────────────────────────────── */
 .preview-paging {
   display: flex;
   align-items: center;
@@ -735,12 +983,17 @@ body {
   font-size: 12px;
 }
 
-/* ─── Modal ──────────────────────────────────────────────────── */
+/* ─── Modal ───────────────────────────────────────────────────────
+   Full-screen dark overlay + centred card. backdrop-filter: blur
+   gives a frosted-glass effect that focuses attention on the modal.
+   position: fixed so it covers the entire viewport regardless of
+   scroll position.
+   ─────────────────────────────────────────────────────────────── */
 .modal-overlay {
   position: fixed;
-  inset: 0;
-  background: rgba(10, 8, 30, 0.52);
-  backdrop-filter: blur(4px);
+  inset: 0;                             /* covers top/right/bottom/left = 0 */
+  background: rgba(10, 8, 30, 0.52);   /* dark navy with 52% opacity */
+  backdrop-filter: blur(4px);           /* blur underlying content for focus */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -823,7 +1076,19 @@ body {
   width: 100%;
 }
 
-/* ─── Sticky App Footer ──────────────────────────────────────── */
+/* ─── Sticky App Footer ───────────────────────────────────────────
+   Always-visible bottom bar that contains the progress bar, the
+   mini log, and the collapsible privacy disclosure.
+
+   position: sticky + bottom: 0 keeps it pinned to the bottom of
+   the viewport as content above scrolls. z-index: 20 layers it
+   above scrolled content (same level as the sticky tab bar).
+   overflow: visible lets the .footer-disclosure <details> expand
+   upward without being clipped by the footer box.
+   box-shadow (pointing upward, negative y-offset) creates a soft
+   shadow above the footer to visually separate it from the scroll
+   content.
+   ─────────────────────────────────────────────────────────────── */
 .app-footer {
   position: sticky;
   bottom: 0;
@@ -831,11 +1096,12 @@ body {
   border-top: 1px solid var(--border);
   padding: 9px 10px 11px;
   z-index: 20;
-  flex-shrink: 0;
-  overflow: visible;
-  box-shadow: 0 -3px 12px rgba(83,74,183,0.08);
+  flex-shrink: 0;       /* never compress the footer height */
+  overflow: visible;    /* allow footer-disclosure to expand upward outside the box */
+  box-shadow: 0 -3px 12px rgba(83,74,183,0.08);  /* upward purple shadow */
 }
 
+/* Row that holds the icon and the mini log line side-by-side */
 .footer-log-row {
   display: flex;
   align-items: center;
@@ -843,25 +1109,37 @@ body {
   margin-top: 7px;
 }
 
+/* Single-line dark terminal strip that displays the most recent log
+   message. flex: 1 makes it fill all space left after the icon.
+   white-space: nowrap + text-overflow: ellipsis clips long messages
+   rather than wrapping and increasing footer height.              */
 .footer-log-mini {
   flex: 1;
-  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;  /* code-like for log output */
   font-size: 10px;
-  color: #9D9BB8;
+  color: #9D9BB8;           /* muted purple-grey — readable on dark background */
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
-  background: #12101F;
+  text-overflow: ellipsis;  /* clip long messages with … */
+  background: #12101F;      /* near-black background — "terminal" aesthetic */
   padding: 5px 10px;
   border-radius: var(--radius-sm);
   min-height: 22px;
   line-height: 14px;
-  border: 1px solid rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.05);  /* barely visible border for definition */
 }
 
-/* ─── Footer disclosure (collapsible privacy note) ───────────── */
+/* ─── Footer disclosure (collapsible privacy note) ───────────────
+   A <details> element that lives INSIDE .app-footer (as its last
+   child) so it expands upward above the footer without creating
+   overlap or layout shift below it.
+
+   The summary button (.footer-disclosure-btn) shows a › chevron
+   that rotates 90° when [open] is set by the browser.
+   The body (.footer-disclosure-body) contains the privacy text.
+   ─────────────────────────────────────────────────────────────── */
 .footer-disclosure {
-  margin: 8px 10px 4px;
+  margin: 8px 10px 4px;  /* top margin separates it from the log row above */
 }
 
 .footer-disclosure-btn {
@@ -959,7 +1237,88 @@ code {
 .tags-hint {
   font-size: 11px;
   color: var(--brand-orange-dark);
-  font-weight: 500;
+  font-weight: 500;  /* slightly bold so it catches the eye without being noisy */
+}
+
+/* ─── Tag insert-target toggle (Body / Subject) ───────────────
+   A small segmented control sitting in the tags-header row.
+   The user picks whether clicking a chip goes to the email body
+   (setSelectedDataAsync) or the Outlook native subject
+   (subject.getAsync + setAsync). The active button gets a filled
+   pill; inactive buttons are ghost-outlined.
+   ─────────────────────────────────────────────────────────── */
+.tag-target-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 99px;        /* pill container */
+  overflow: hidden;
+  gap: 0;
+  margin-left: auto;          /* push to the right inside .tags-header flex row */
+}
+
+.tag-target-btn {
+  padding: 2px 9px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: inherit;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition), color var(--transition);
+}
+
+.tag-target-btn:hover:not(.active) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.tag-target-btn.active {
+  background: var(--brand-orange);
+  color: #fff;
+}
+
+/* ─── Tag chip internals ──────────────────────────────────────
+   Each tag chip (<span data-tag="…">) contains two children:
+     1. .tag-label  — the visible tag text (e.g. "{{first_name}}")
+     2. .tag-remove-btn — ✕ button shown only on custom (non-default) chips
+   Using a separate label span ensures the ✕ button never becomes
+   part of the text that gets inserted into the email / subject.
+   ─────────────────────────────────────────────────────────── */
+.tag-label {
+  display: inline;  /* stays inline with surrounding text inside the chip */
+}
+
+/* ── Remove button (✕) on custom tag chips ───────────────────
+   Appears to the right of the tag label text.
+   Uses inline-flex so the × glyph is perfectly centred.
+   Inherits the chip's text colour so it adapts to both
+   default and dark-mode colour schemes automatically.
+   ─────────────────────────────────────────────────────────── */
+.tag-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 5px;            /* breathing room between label text and × */
+  padding: 0 2px;
+  background: none;            /* transparent — matches chip background */
+  border: none;
+  color: inherit;              /* inherit chip text colour */
+  opacity: 0.55;               /* subtle at rest so label is the focus */
+  cursor: pointer;
+  font-size: 10px;             /* small × that doesn't overpower the label */
+  font-family: inherit;
+  line-height: 1;
+  border-radius: 99px;         /* fully rounded so hover state is a soft circle */
+  transition: opacity var(--transition), background var(--transition), color var(--transition);
+  vertical-align: middle;      /* align × glyph with the label baseline */
+}
+
+.tag-remove-btn:hover {
+  opacity: 1;                              /* fully opaque on hover */
+  background: rgba(196, 37, 42, 0.15);    /* soft red tint to signal destructive action */
+  color: var(--danger);                    /* red × on hover reinforces "delete" intent */
 }
 
 /* ─── Hint-advanced collapsible ──────────────────────────────── */
@@ -1097,5 +1456,105 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
   font-weight: 700;
 }
 
-/* ─── Utility ────────────────────────────────────────────────── */
+/* ─── Utility ─────────────────────────────────────────────────────
+   .hidden is toggled on/off by JS to show and hide elements.
+   !important ensures it overrides any other display value even
+   when specificity would otherwise favour a component rule.
+   ─────────────────────────────────────────────────────────────── */
 .hidden { display: none !important; }
+
+/* ─── Drag-and-drop CSV zone ──────────────────────────────────────
+   The .csv-drop-zone wraps the CSV textarea and uses a position:
+   absolute overlay (.csv-drop-hint) to display a dashed "Drop CSV
+   here" prompt when the user drags a file over the area.
+   JS adds/removes .drag-over during dragenter/dragleave/drop events.
+   ─────────────────────────────────────────────────────────────── */
+.csv-drop-zone {
+  position: relative;  /* establishes positioning context for the absolute overlay */
+}
+
+/* Overlay shown during an active drag — hidden by default (display: none).
+   pointer-events: none ensures the overlay doesn't block the drop event
+   that fires on the underlying textarea.                           */
+.csv-drop-hint {
+  display: none;
+  position: absolute;
+  inset: 0;                              /* covers entire .csv-drop-zone */
+  background: rgba(91, 82, 200, 0.08);  /* light purple tint */
+  border: 2px dashed var(--accent);     /* dashed border = "drop target" */
+  border-radius: var(--radius);
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  pointer-events: none;  /* let drag events pass through to the textarea below */
+  z-index: 2;
+}
+
+.csv-drop-zone.drag-over .csv-drop-hint {
+  display: flex;    /* show the overlay when a file is being dragged over */
+}
+
+.csv-drop-zone.drag-over .csv-area {
+  opacity: 0.3;     /* fade the textarea so the overlay text is readable */
+}
+
+/* ─── Step 1 test-send row ────────────────────────────────────────
+   Orange-tinted banner inside the footer prompting users to send
+   a test email to themselves before running the full merge.
+   The gradient and border are brand-orange rather than accent-purple
+   to draw extra attention — it's the most important footer action.
+   ─────────────────────────────────────────────────────────────── */
+.footer-step1-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(135deg, rgba(245,130,32,0.08) 0%, rgba(245,130,32,0.03) 100%);
+  border: 1px solid rgba(245,130,32,0.25);
+  border-radius: var(--radius);
+  padding: 7px 10px;
+  margin-bottom: 8px;
+}
+
+/* "STEP 1" uppercase label — visually styled like a badge */
+.step1-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--brand-orange-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  flex-shrink: 0;  /* don't let the label compress under flex pressure */
+}
+
+/* Compact <select> for choosing which recipient to test-send to */
+.step1-row-select {
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid rgba(245,130,32,0.35);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font-family: inherit;
+  max-width: 80px;   /* keep the select narrow so the button has room to breathe */
+}
+
+/* Orange "Send test" button — grows to fill remaining row space */
+.btn-step1 {
+  flex: 1;
+  background: linear-gradient(180deg, var(--brand-orange) 0%, var(--brand-orange-dark) 100%);
+  color: #fff;
+  border: none;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 7px 14px;
+  cursor: pointer;
+  transition: opacity var(--transition), transform var(--transition);
+  box-shadow: 0 2px 8px var(--brand-orange-glow);
+  white-space: nowrap;
+}
+
+.btn-step1:hover { opacity: 0.88; transform: translateY(-1px); }
+.btn-step1:active { transform: scale(0.97); opacity: 0.95; }
