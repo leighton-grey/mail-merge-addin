@@ -253,7 +253,9 @@ body {
   padding: 14px 16px;
   margin: 0 10px 10px;  /* 10px horizontal gutter, 10px gap between stacked sections */
   box-shadow: var(--shadow-sm);
-  overflow: hidden;     /* clip any child that would bleed outside the card */
+  overflow: clip;       /* clip child overflow to card edges WITHOUT creating a scroll
+                           container — unlike overflow:hidden, clip lets child elements
+                           (e.g. #previewTable) have their own independent scroll axis */
   min-width: 0;         /* allow section to shrink below its content's natural width */
 }
 
@@ -627,9 +629,12 @@ body {
    ─────────────────────────────────────────────────────────────── */
 
 /* Allow the preview-table section to scroll horizontally on its own
-   so a wide CSV doesn't push the whole pane sideways.              */
+   so a wide CSV doesn't push the whole pane sideways.
+   overscroll-behavior-x: contain stops macOS from treating a leftward
+   horizontal swipe as browser Back navigation instead of a table scroll. */
 #previewTable {
-  overflow-x: auto;   /* table scrolls within the card, not the whole pane */
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
 }
 
 .preview-table {
