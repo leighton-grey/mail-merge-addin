@@ -9,7 +9,7 @@
   },
   "description": {
     "short": "Personalized bulk email directly in New Outlook.",
-    "full": "A free, open-source mail merge add-in for New Outlook. Replaces classic Word-to-Outlook mail merge. Processes all data locally in your browser — zero data ever touches our servers."
+    "full": "A free, open-source mail merge add-in for New Outlook. Replaces classic Word-to-Outlook mail merge. Processes all data locally in your browser \u2014 zero data ever touches our servers."
   },
   "developer": {
     "name": "Promethean IT",
@@ -18,8 +18,8 @@
     "termsOfUseUrl": "https://leighton-grey.github.io/mail-merge-addin/terms.html"
   },
   "icons": {
-    "color": "https://leighton-grey.github.io/mail-merge-addin/assets/icon-color.png",
-    "outline": "https://leighton-grey.github.io/mail-merge-addin/assets/icon-outline.png"
+    "color": "icon-color.png",
+    "outline": "icon-outline.png"
   },
   "accentColor": "#F58220",
   "webApplicationInfo": {
@@ -42,7 +42,9 @@
   "extensions": [
     {
       "requirements": {
-        "scopes": ["mail"],
+        "scopes": [
+          "mail"
+        ],
         "capabilities": [
           {
             "name": "Mailbox",
@@ -78,7 +80,9 @@
       ],
       "ribbons": [
         {
-          "contexts": ["mailCompose"],
+          "contexts": [
+            "mailCompose"
+          ],
           "tabs": [
             {
               "builtInTabId": "TabDefault",
