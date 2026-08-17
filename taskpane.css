@@ -1100,6 +1100,27 @@ body {
   align-items: center;
 }
 
+/* Column-name input inside the edit table toolbar — explicitly styled
+   so text is always visible regardless of modal background context.  */
+#newColNameInput {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+#newColNameInput::placeholder { color: var(--text-muted); }
+#newColNameInput:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
 .edit-table-grid {
   overflow: auto;
   flex: 1;

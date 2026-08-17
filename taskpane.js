@@ -327,37 +327,57 @@ Office.onReady((info) => {
         sec === 0 ? "(no delay between batches)" : `(${sec} s between batches)`;
     });
 
+    // Helper: set tagTarget and keep the Body/Subject toggle pills in sync.
+    // Call this from any focus/blur/click handler so the UI always reflects reality.
+    function applyTagTarget(target) {
+      tagTarget = target;
+      const bodyBtn    = document.getElementById("targetBodyBtn");
+      const subjectBtn = document.getElementById("targetSubjectBtn");
+      if (target === "subject") {
+        subjectBtn.classList.add("active");
+        bodyBtn.classList.remove("active");
+      } else {
+        bodyBtn.classList.add("active");
+        subjectBtn.classList.remove("active");
+      }
+    }
+
     const subjectInput = document.getElementById("subjectInput");
-    // On focus: mark that subject has focus AND immediately update the tag hint
-    // text so users know clicking a tag will target the subject line.
+    // On focus: mark that subject has focus, auto-switch toggle to Subject,
+    // and update the tag hint so users know clicking a tag targets the subject.
     subjectInput.addEventListener("focus", () => {
       subjectHasFocus = true;
+      applyTagTarget("subject");
       clearTimeout(_hintResetTimer);  // cancel any pending reset from a previous blur
       updateTagHint(true);
     });
-    // On blur: mark focus as lost, then reset the hint after 150 ms.
-    // The 150 ms delay is intentional — it covers the full mousedown→blur→click
-    // sequence. If the user clicked a tag chip, the click fires within ~50-80 ms
-    // of blur, so the hint (and the snapshot in _subjectWasFocused) are still
-    // correct when insertTag() runs.
+    // On blur: mark focus as lost, auto-switch toggle back to Body,
+    // then reset the hint after 150 ms.
+    // The 150 ms delay covers the full mousedown→blur→click sequence —
+    // if the user clicked a tag chip, the click fires within ~50-80 ms
+    // of blur, so the hint (and _subjectWasFocused) are still correct
+    // when insertTag() runs.
     subjectInput.addEventListener("blur", () => {
       subjectHasFocus = false;
+      applyTagTarget("body");
       _hintResetTimer = setTimeout(() => updateTagHint(false), 150);
     });
 
-    // Cross-frame focus fix: when the user clicks in the Outlook compose body
-    // (a different iframe), the subjectInput blur event does NOT fire — cross-frame
-    // clicks are invisible to the source frame's blur listeners. However, the
-    // taskpane's *window* does lose focus, and window.blur fires reliably.
-    // Without this listener, subjectHasFocus would stay true permanently after
-    // any subject interaction, routing every subsequent tag click to the subject
-    // path instead of setSelectedDataAsync → Outlook body.
+    // Cross-frame focus fix: when the user clicks in the Outlook compose area
+    // (a different iframe or native window), the subjectInput blur event does NOT
+    // fire — cross-frame clicks are invisible to the source frame's blur listeners.
+    // However, the taskpane's *window* does lose focus reliably.
+    // We auto-switch to Body because clicking into Outlook almost always means
+    // the user intends to place the cursor in the compose body.
+    // (Native subject vs body is indistinguishable from inside the task pane iframe.)
     window.addEventListener("blur", () => {
       if (subjectHasFocus) {
         subjectHasFocus = false;
         clearTimeout(_hintResetTimer);
         updateTagHint(false);
       }
+      // Always snap back to Body when task pane loses focus — native Outlook click.
+      applyTagTarget("body");
     });
 
     // mousedown on tagBar: snapshot whether subject had focus BEFORE blur fires.
@@ -378,19 +398,12 @@ Office.onReady((info) => {
       if (chip) insertTag(chip.dataset.tag, _subjectWasFocused);
     });
 
-    // Body / Subject toggle — updates tagTarget and flips the active pill.
-    // When "Subject" is active, insertTag() uses subject.getAsync + setAsync
-    // to append the token to the native Outlook subject line instead of
-    // inserting into the compose body via setSelectedDataAsync.
+    // Body / Subject toggle — manual override. applyTagTarget keeps the pills in sync.
     document.getElementById("targetBodyBtn").addEventListener("click", () => {
-      tagTarget = "body";
-      document.getElementById("targetBodyBtn").classList.add("active");
-      document.getElementById("targetSubjectBtn").classList.remove("active");
+      applyTagTarget("body");
     });
     document.getElementById("targetSubjectBtn").addEventListener("click", () => {
-      tagTarget = "subject";
-      document.getElementById("targetSubjectBtn").classList.add("active");
-      document.getElementById("targetBodyBtn").classList.remove("active");
+      applyTagTarget("subject");
     });
 
     document.getElementById("customTagInput").addEventListener("keydown", (e) => {
@@ -459,7 +472,7 @@ Office.onReady((info) => {
 
     // Match Fields modal (Feature 1)
     document.getElementById("mapFieldsBtn").addEventListener("click", () => {
-      const headers = parsedRecipients.length > 0 ? Object.keys(parsedRecipients[0]) : [];
+      const headers = parsedRecipients.length > 0 ? Object.keys(parsedRecipients[0]).filter(k => !k.startsWith("_")) : [];
       openMatchFieldsModal(headers);
     });
     document.getElementById("matchFieldsCloseBtn").addEventListener("click", () => {
@@ -2301,7 +2314,7 @@ function populateFilterSortBar(headers) {
 function addFilterCondition(colVal = "", opVal = "contains", valVal = "") {
   filterConditionCount++;
   const id = filterConditionCount;
-  const headers = parsedRecipients.length > 0 ? Object.keys(parsedRecipients[0]) : [];
+  const headers = parsedRecipients.length > 0 ? Object.keys(parsedRecipients[0]).filter(k => !k.startsWith("_")) : [];
   const colOptions = headers.map(h =>
     `<option value="${escapeHtml(h)}" ${h === colVal ? "selected" : ""}>${escapeHtml(h)}</option>`
   ).join("");
@@ -2502,7 +2515,7 @@ function parseAndPreview() {
   document.getElementById("recipientCount").textContent =
     `${mappedRows.length} recipient${mappedRows.length !== 1 ? "s" : ""} loaded`;
 
-  populateFilterSortBar(Object.keys(mappedRows[0] || {}));
+  populateFilterSortBar(Object.keys(mappedRows[0] || {}).filter(k => !k.startsWith("_")));
   renderPreviewTable(parsedRecipients);
   populateInsertFieldSelect(headers);
   log(`Parsed ${mappedRows.length} recipients. Showing preview.`, "success");
@@ -2522,7 +2535,7 @@ function renderPreviewTable(rows) {
   previewTablePage = Math.min(previewTablePage, Math.max(0, totalPages - 1));
   const pageRows = rows.slice(previewTablePage * PREVIEW_PAGE_SIZE, (previewTablePage + 1) * PREVIEW_PAGE_SIZE);
 
-  const headers = Object.keys(rows[0]);
+  const headers = Object.keys(rows[0]).filter(h => !h.startsWith("_"));
   let html = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
     '<label class="label" style="margin:0;">Preview (rows ' + (previewTablePage * PREVIEW_PAGE_SIZE + 1) + '–' + Math.min((previewTablePage + 1) * PREVIEW_PAGE_SIZE, rows.length) + ' of ' + rows.length + ')</label>' +
     '<button class="btn-secondary btn-edit-table" id="openEditTableBtn">✏ Edit table</button>' +
@@ -5328,7 +5341,7 @@ function openEditTableModal() {
     log("Load a recipient list first before editing.", "error");
     return;
   }
-  editTableHeaders = Object.keys(parsedRecipients[0]).filter(k => k !== "_originalIndex");
+  editTableHeaders = Object.keys(parsedRecipients[0]).filter(k => !k.startsWith("_"));
   editTableRows = parsedRecipients.map(row =>
     editTableHeaders.map(h => row[h] !== undefined ? String(row[h]) : "")
   );
@@ -5435,8 +5448,13 @@ function editTableAddColumn() {
 
 function saveEditTableChanges() {
   flushEditTableInputs();
+  const oldRecipients = parsedRecipients.slice();
   parsedRecipients = editTableRows.map(function(row, i) {
     const obj = { _originalIndex: i };
+    // Preserve internal tracking fields from original row so send logic still works
+    if (oldRecipients[i] && oldRecipients[i]._csvRow !== undefined) {
+      obj._csvRow = oldRecipients[i]._csvRow;
+    }
     editTableHeaders.forEach(function(h, col) {
       obj[h] = row[col] !== undefined ? row[col] : "";
     });
