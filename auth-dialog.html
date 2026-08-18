@@ -377,18 +377,33 @@
     Office.initialize = function() {};
 
     const CLIENT_ID    = "d06ae3cf-a7da-4264-b20e-ab8d70c06977";
-    const TENANT_ID    = "common";
+    const TENANT_ID    = "04ca7ab1-691d-45a2-928f-574b3e3300a0";
     const REDIRECT_URI = window.location.href.split('?')[0];
     const SCOPES       = ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"];
 
     function sendToParent(data) {
       dbg("sendToParent → " + data.type);
-      try {
-        Office.context.ui.messageParent(JSON.stringify(data));
-        dbg("messageParent OK", "log-ok");
-      } catch (e) {
-        showError("Could not relay sign-in result: " + e.message);
+      var payload = JSON.stringify(data);
+
+      function tryMessageParent(attempts) {
+        if (attempts <= 0) {
+          showError("Could not relay sign-in result: Office dialog API unavailable after retries");
+          return;
+        }
+        if (Office && Office.context && Office.context.ui && typeof Office.context.ui.messageParent === "function") {
+          try {
+            Office.context.ui.messageParent(payload);
+            dbg("messageParent OK", "log-ok");
+          } catch (e) {
+            showError("Could not relay sign-in result: " + e.message);
+          }
+        } else {
+          dbg("Office.context.ui not ready — retrying (" + attempts + ")...");
+          setTimeout(function() { tryMessageParent(attempts - 1); }, 500);
+        }
       }
+
+      tryMessageParent(10);
     }
 
     var msalInstance = null;
