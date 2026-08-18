@@ -113,6 +113,15 @@ const GRAPH_BATCH_URL     = "https://graph.microsoft.com/v1.0/$batch";
 const BATCH_SIZE          = 20;
 const BATCH_DELAY_MS      = 1500;   // default — overridden at runtime by batchDelayInput
 const MAX_RETRIES         = 3;
+
+// ── Licensing ──────────────────────────────────────────────────────────────
+// Set LICENSE_ENFORCEMENT = true to enforce the license gate.
+// While false the check still runs silently — flip to true when ready to go live.
+const LICENSE_ENFORCEMENT      = false;
+const LICENSE_API_URL          = "https://YOUR_FUNCTION_APP.azurewebsites.net/api/license";
+const LICENSE_CACHE_KEY        = "mailmerge_license_token";
+const LICENSE_CACHE_EXPIRY_KEY = "mailmerge_license_expiry";
+// ──────────────────────────────────────────────────────────────────────────
 const EMAIL_REGEX         = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
 // P3: hoisted to module scope — prevents recompilation on every personalize() call
 const TOKEN_REGEX         = /\{\{([^}|]+)(?:\|([^}]*))?\}\}/gi;
@@ -209,9 +218,175 @@ let contactsActiveTab = "contacts"; // "contacts" | "groups" | "directory"
 let directoryData = [];
 let selectedDirectory = new Set();
 
+// ── License check ─────────────────────────────────────────────────────────
+/**
+ * Checks whether the signed-in user's tenant has an active subscription.
+ * Result is cached in localStorage for 24 hours (matching the JWT expiry on the server).
+ *
+ * When LICENSE_ENFORCEMENT is false this function runs and logs silently — it does not
+ * block any features. Flip LICENSE_ENFORCEMENT = true when ready to gate the product.
+ */
+async function checkLicense() {
+  // 1. Check local cache first (avoid API call on every startup)
+  const cachedToken  = localStorage.getItem(LICENSE_CACHE_KEY);
+  const cachedExpiry = localStorage.getItem(LICENSE_CACHE_EXPIRY_KEY);
+  if (cachedToken && cachedExpiry && Date.now() < parseInt(cachedExpiry, 10)) {
+    log("License: valid (cached)", "info");
+    return;
+  }
+
+  // 2. Get user identity from MSAL token claims (already authenticated by this point)
+  let userId   = null;
+  let tenantId = null;
+  let email    = null;
+  try {
+    const account = Office.context.mailbox.userProfile;
+    email    = account && account.emailAddress ? account.emailAddress : null;
+    // Extract tenantId and userId from the Office identity token if available
+    const idToken = Office.context.auth && Office.context.auth.getAccessTokenAsync
+      ? null  // Will be populated below via getAccessTokenAsync
+      : null;
+  } catch (e) {
+    log("License: could not read Office profile — " + e.message, "warn");
+  }
+
+  // 3. Use Office SSO to get a token with user identity claims
+  let ssoToken = null;
+  try {
+    await new Promise((resolve) => {
+      Office.auth.getAccessToken({ allowSignInPrompt: false, allowConsentPrompt: false }, (result) => {
+        if (result.status === Office.AsyncResultStatus.Succeeded) {
+          ssoToken = result.value;
+          // Decode JWT payload (middle segment) to extract tid and oid
+          try {
+            const payload = JSON.parse(atob(ssoToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+            tenantId = payload.tid || null;
+            userId   = payload.oid || null;
+          } catch { /* non-fatal */ }
+        }
+        resolve();
+      });
+    });
+  } catch (e) {
+    log("License: SSO token unavailable — " + e.message, "warn");
+  }
+
+  if (!userId || !tenantId) {
+    log("License: could not determine user identity, skipping check.", "warn");
+    return;
+  }
+
+  // 4. Call the license API
+  try {
+    const params = new URLSearchParams({ userId, tenantId });
+    if (email) params.set("email", email);
+    const res = await fetch(`${LICENSE_API_URL}?${params.toString()}`);
+
+    if (!res.ok) {
+      log(`License API returned ${res.status} — treating as unlicensed.`, "warn");
+      if (LICENSE_ENFORCEMENT) showLicenseGate("server_error");
+      return;
+    }
+
+    const data = await res.json();
+
+    if (data.licensed) {
+      log(`License: active — plan: ${data.plan}`, "info");
+      // Cache the token until its expiry
+      localStorage.setItem(LICENSE_CACHE_KEY, data.token || "valid");
+      localStorage.setItem(LICENSE_CACHE_EXPIRY_KEY, String(new Date(data.expiresAt).getTime()));
+    } else {
+      log(`License: not active — reason: ${data.reason}`, "warn");
+      if (LICENSE_ENFORCEMENT) showLicenseGate(data.reason);
+    }
+  } catch (err) {
+    log("License check network error (non-fatal): " + err.message, "warn");
+    // Never block the add-in on a network error — fail open
+  }
+}
+
+/**
+ * Shows a non-dismissible overlay when LICENSE_ENFORCEMENT is true and the user is unlicensed.
+ * @param {string} reason - "no_subscription" | "suspended" | "server_error"
+ */
+function showLicenseGate(reason) {
+  const messages = {
+    no_subscription: {
+      title: "Subscription required",
+      body: "Mail Merge requires an active subscription. Purchase one through Microsoft AppSource to continue.",
+      link: "https://appsource.microsoft.com"
+    },
+    suspended: {
+      title: "Subscription suspended",
+      body: "Your subscription is currently suspended, likely due to a payment issue. Please update your payment method in Microsoft 365 Admin Center.",
+      link: "https://admin.microsoft.com"
+    },
+    server_error: {
+      title: "License check unavailable",
+      body: "We could not verify your subscription right now. Please try again later or contact support.",
+      link: null
+    }
+  };
+
+  const m = messages[reason] || messages["no_subscription"];
+
+  const gate = document.createElement("div");
+  gate.style.cssText = [
+    "position:fixed", "inset:0", "z-index:99999",
+    "background:rgba(243,242,251,0.97)", "backdrop-filter:blur(8px)",
+    "display:flex", "align-items:center", "justify-content:center",
+    "padding:24px"
+  ].join(";");
+
+  const card = document.createElement("div");
+  card.style.cssText = [
+    "background:#fff", "border-radius:20px", "padding:36px 32px",
+    "max-width:360px", "width:100%", "text-align:center",
+    "box-shadow:0 8px 40px rgba(108,98,212,0.16)"
+  ].join(";");
+
+  const icon = document.createElement("div");
+  icon.style.cssText = "font-size:44px;margin-bottom:14px";
+  icon.textContent = reason === "suspended" ? "⚠️" : "🔒";
+
+  const h2 = document.createElement("h2");
+  h2.style.cssText = "font-size:18px;font-weight:700;color:#1C1C1E;margin-bottom:10px";
+  h2.textContent = m.title;
+
+  const p = document.createElement("p");
+  p.style.cssText = "font-size:14px;color:#6B6B6B;line-height:1.6;margin-bottom:20px";
+  p.textContent = m.body;
+
+  card.appendChild(icon);
+  card.appendChild(h2);
+  card.appendChild(p);
+
+  if (m.link) {
+    const btn = document.createElement("a");
+    btn.href = m.link;
+    btn.target = "_blank";
+    btn.rel = "noopener noreferrer";
+    btn.style.cssText = [
+      "display:inline-block",
+      "background:linear-gradient(135deg,#6C62D4,#534AB7)",
+      "color:#fff", "border-radius:99px", "padding:10px 28px",
+      "font-size:14px", "font-weight:600", "text-decoration:none"
+    ].join(";");
+    btn.textContent = reason === "suspended" ? "Manage subscription" : "Get a subscription";
+    card.appendChild(btn);
+  }
+
+  gate.appendChild(card);
+  document.body.appendChild(gate);
+}
+// ──────────────────────────────────────────────────────────────────────────
+
 Office.onReady((info) => {
   if (info.host === Office.HostType.Outlook) {
     log("Office.js ready. Host: Outlook.", "info");
+
+    // License check (runs silently; enforcement controlled by LICENSE_ENFORCEMENT flag)
+    checkLicense().catch(err => log("License check failed (non-fatal): " + err.message, "warn"));
 
     // C1 / C2: Check for Exchange Online mailbox — restUrl is null for IMAP/Gmail-only accounts
     const restUrl = Office.context.mailbox.restUrl;
@@ -232,7 +407,7 @@ Office.onReady((info) => {
         you just need an M365 account with Exchange Online as well, and Outlook must be signed in
         with that M365 account (not the Google account).</em><br><br>
         <a href="https://learn.microsoft.com/en-us/microsoft-365/admin/misc/why-cant-i-do-mail-merge"
-           style="color:#fff;text-decoration:underline;" target="_blank">Learn more about Exchange Online requirements</a>`;
+           style="color:#fff;text-decoration:underline;" target="_blank" rel="noopener noreferrer">Learn more about Exchange Online requirements</a>`;
       document.body.insertBefore(banner, document.body.firstChild);
       ["mergeBtn","testSendBtn","previewAllBtn","saveDraftsBtn","broadcastBtn"].forEach(id => {
         const el = document.getElementById(id);
@@ -242,7 +417,24 @@ Office.onReady((info) => {
 
     document.getElementById("mergeBtn").addEventListener("click", handleMergeClick);
     document.getElementById("stopBtn").addEventListener("click", handleStop);
-    document.getElementById("previewBtn").addEventListener("click", parseAndPreview);
+    const previewBtn = document.getElementById("previewBtn");
+    if (previewBtn) previewBtn.addEventListener("click", parseAndPreview);
+
+    // Optional columns dropdown toggle
+    const csvOptionalToggle = document.getElementById("csvOptionalToggle");
+    const csvOptionalList   = document.getElementById("csvOptionalList");
+    if (csvOptionalToggle && csvOptionalList) {
+      function toggleCsvOptional() {
+        const open = !csvOptionalList.classList.contains("hidden");
+        csvOptionalList.classList.toggle("hidden", open);
+        csvOptionalToggle.textContent = open ? "Optional columns ▾" : "Optional columns ▴";
+        csvOptionalToggle.setAttribute("aria-expanded", String(!open));
+      }
+      csvOptionalToggle.addEventListener("click", toggleCsvOptional);
+      csvOptionalToggle.addEventListener("keydown", e => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleCsvOptional(); }
+      });
+    }
     document.getElementById("clearLogBtn").addEventListener("click", clearLog);
     document.getElementById("addCustomTagBtn").addEventListener("click", addCustomTag);
     document.getElementById("confirmSendBtn").addEventListener("click", confirmSend);
@@ -442,7 +634,11 @@ Office.onReady((info) => {
     initOptOutUI();
 
     document.getElementById("toggleLogBtn").addEventListener("click", () => {
-      document.getElementById("fullLogArea").classList.toggle("hidden");
+      const mini = document.getElementById("footerLogMini");
+      const full = document.getElementById("fullLogArea");
+      const open = !full.classList.contains("hidden");
+      full.classList.toggle("hidden", open);
+      mini.classList.toggle("hidden", open);
     });
 
     // Import from Contacts (Feature 1)
@@ -801,6 +997,48 @@ function log(message, type = "info") {
 }
 
 /**
+ * Show a brief toast notification for user-facing guidance messages.
+ * Toasts slide in from the top and auto-dismiss after `duration` ms.
+ * They are in addition to the detailed log (for support use).
+ *
+ * @param {string} message - Human-readable message to display
+ * @param {"info"|"success"|"warning"|"error"} [type="info"] - Severity
+ * @param {number} [duration=4000] - Auto-dismiss delay in ms (0 = never)
+ */
+function showToast(message, type, duration) {
+  if (!type) type = "info";
+  if (duration === undefined) duration = 4000;
+  var icons = { info: "💡", success: "✓", warning: "⚠️", error: "✕" };
+  var container = document.getElementById("toastContainer");
+  if (!container) return;
+  var toast = document.createElement("div");
+  toast.className = "toast toast-" + type;
+  toast.setAttribute("role", "alert");
+  var iconSpan = document.createElement("span");
+  iconSpan.className = "toast-icon";
+  iconSpan.textContent = icons[type] || "💡";
+  var msgSpan = document.createElement("span");
+  msgSpan.className = "toast-msg";
+  msgSpan.textContent = message;
+  var closeBtn = document.createElement("button");
+  closeBtn.className = "toast-close";
+  closeBtn.setAttribute("aria-label", "Dismiss");
+  closeBtn.textContent = "×";
+  toast.appendChild(iconSpan);
+  toast.appendChild(msgSpan);
+  toast.appendChild(closeBtn);
+  container.appendChild(toast);
+  var dismiss = function() {
+    if (toast.parentNode) {
+      toast.classList.add("toast-hide");
+      setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 220);
+    }
+  };
+  closeBtn.addEventListener("click", dismiss);
+  if (duration > 0) setTimeout(dismiss, duration);
+}
+
+/**
  * Clear all entries from the status log and reset to the initial ready state.
  */
 function clearLog() {
@@ -883,18 +1121,25 @@ function updateQuickModeCSV() {
   const emails = raw.split(/[\n,;]+/).map(e => e.trim()).filter(e => e && EMAIL_REGEX.test(e));
   const csvInput = document.getElementById("csvInput");
   if (!csvInput) return;
+
   if (emails.length === 0) {
+    // Textarea cleared — wipe the recipient list and preview immediately
+    // without calling parseAndPreview() (which would wrongly open Match Fields on an empty CSV)
     csvInput.value = "";
-  } else {
-    csvInput.value = "email\n" + emails.join("\n");
+    parsedRecipients = [];
+    selectedRowIndices = null;
+    const countEl = document.getElementById("recipientCount");
+    if (countEl) countEl.textContent = "0 recipients";
+    renderPreviewTable([]);
+    return;
   }
+
+  csvInput.value = "email\n" + emails.join("\n");
   csvInput.dispatchEvent(new Event("input"));
   csvInput.dispatchEvent(new Event("change"));
   // Debounce parseAndPreview — don't re-parse on every keypress
   clearTimeout(_quickModeParseTimer);
-  if (emails.length > 0) {
-    _quickModeParseTimer = setTimeout(() => parseAndPreview(), 350);
-  }
+  _quickModeParseTimer = setTimeout(() => parseAndPreview(), 350);
 }
 
 /* ─── SYNC RECIPIENTS FROM OUTLOOK'S TO FIELD ───────────────────
@@ -1059,10 +1304,14 @@ function restoreLocalState() {
     parseAndPreview();  // rebuild recipient table from the restored CSV string
   }
 
-  // Restore user-added custom tag chips (non-default, non-smart tags).
-  // DEFAULT_TAGS are already rendered in the HTML; duplicates are silently ignored by addTagToBar().
-  const savedTags = JSON.parse(lsGet(LS_KEY_TAGS) || "[]");
-  savedTags.forEach(tag => addTagToBar(tag));
+  // Restore manually-added custom tag chips (non-default, non-smart tags).
+  // On each startup, clear any tags that were persisted by older versions —
+  // CSV column tags should never survive a taskpane reload because the CSV
+  // data itself is in-memory only. Only tags the user explicitly types via
+  // the custom tag input are saved going forward (persist=false for CSV tags).
+  lsSet(LS_KEY_TAGS, JSON.stringify([]));
+  // (savedTags intentionally empty after the clear — users re-add manual tags
+  //  as needed; CSV column tags reappear automatically when CSV is reloaded.)
 
   renderTemplateList();  // rebuild the saved-template picker in the Compose tab
 
@@ -1308,6 +1557,7 @@ function applyMatchFields() {
   });
   if (!newMapping.email) {
     log("Match Fields: 'Email' column is required — please map it.", "warning");
+    showToast("Please map a column to Email before applying.", "warning");
     return;
   }
   fieldMapping = newMapping;
@@ -1555,6 +1805,7 @@ async function handlePreviewAll() {
   const toPreview = getFilteredSortedRecipients();
   if (!toPreview.length) {
     log("No recipients to preview.", "warning");
+    showToast("No recipients to preview. Load a CSV or add recipients first.", "warning");
     return;
   }
   const subjectTemplate = document.getElementById("subjectInput").value.trim();
@@ -1774,6 +2025,7 @@ function insertTag(tag, forceSubject = false) {
     // Restore focus so the user can click another tag immediately.
     input.focus();
     log(`Inserted tag into subject (taskpane): ${tag}`, "success");
+    showToast(`${tag} added to subject.`, "success", 2000);
 
   } else if (tagTarget === "subject") {
     // ── Path 2: Append to the Outlook native subject via Office.js ─
@@ -1798,6 +2050,7 @@ function insertTag(tag, forceSubject = false) {
           // push-to-Outlook debounce — we just came FROM Outlook).
           lsSet(LS_KEY_SUBJECT, newSubject);
           log(`Inserted tag into subject (native): ${tag}`, "success");
+          showToast(`${tag} added to subject.`, "success", 2000);
         }
       });
     });
@@ -1817,6 +2070,7 @@ function insertTag(tag, forceSubject = false) {
           log(`Failed to insert tag into body: ${tag}`, "error");
         } else {
           log(`Inserted tag into body: ${tag}`, "success");
+          showToast(`${tag} inserted into body.`, "success", 2000);
         }
       }
     );
@@ -1867,7 +2121,11 @@ function addCustomTag() {
  * @param {string} tag   - The placeholder string, e.g. "{{first_name}}"
  * @param {string} [type] - "smart" for computed tags like {{today}} / {{greeting_line}}
  */
-function addTagToBar(tag, type) {
+function addTagToBar(tag, type, persist) {
+  // persist defaults to true for manually-added tags, false for CSV-column tags.
+  // CSV column tags are transient (the CSV data is in-memory only) so they
+  // should never be saved to localStorage.
+  if (persist === undefined) persist = true;
   // Bail out early if this tag chip already exists (prevents duplicates
   // when restoring from localStorage or re-parsing the same CSV).
   const existing = document.querySelector(`#tagBar [data-tag="${CSS.escape(tag)}"]`);
@@ -1922,8 +2180,8 @@ function addTagToBar(tag, type) {
   });
 
   bar.appendChild(chip);
-  // Persist non-smart custom tags to localStorage so they survive page reloads.
-  if (type !== "smart") saveCustomTagsToStorage();
+  // Only persist to localStorage for manually-added tags, not CSV column tags.
+  if (type !== "smart" && persist) saveCustomTagsToStorage();
 }
 
 /**
@@ -1940,6 +2198,16 @@ function removeTagFromBar(tag) {
     saveCustomTagsToStorage();  // update persisted custom tags list
     log(`Removed custom tag: ${tag}`, "info");
   }
+}
+
+/**
+ * Remove all CSV-derived custom tag chips (tag-custom class) from the bar
+ * and clear them from localStorage. Called when a new CSV is loaded so stale
+ * column tags from the previous file don't linger.
+ */
+function clearCsvTags() {
+  document.querySelectorAll("#tagBar .tag-custom").forEach(chip => chip.remove());
+  lsSet(LS_KEY_TAGS, JSON.stringify([]));
 }
 
 /**
@@ -2443,9 +2711,11 @@ function parseAndPreview() {
     document.getElementById("mapFieldsBtn").style.display = "";
     if (!fieldMapping.email) {
       log("No 'email' column detected — opening Match Fields to map columns.", "warning");
+      showToast("No 'email' column found. Use Match Fields to map your email column.", "warning");
       openMatchFieldsModal(headers);
     } else {
       log("CSV must contain an 'email' column (or map a column to email).", "error");
+      showToast("Your CSV needs an 'email' column, or use Match Fields to map one.", "error");
     }
     return;
   }
@@ -2503,9 +2773,12 @@ function parseAndPreview() {
         `${dupeList}. Enable "Remove duplicates" in send options or edit the file.`, "warning");
   }
 
+  // Clear tags from any previous CSV before adding the new file's columns
+  clearCsvTags();
+
   headers.forEach(h => {
     const tag = `{{${h}}}`;
-    if (!DEFAULT_TAGS.includes(tag)) addTagToBar(tag);
+    if (!DEFAULT_TAGS.includes(tag)) addTagToBar(tag, undefined, false);
   });
 
   // Feature 4: always expose merge_table and unsubscribe_link as smart tags
@@ -2513,7 +2786,7 @@ function parseAndPreview() {
   addTagToBar("{{unsubscribe_link}}", "smart");
 
   document.getElementById("recipientCount").textContent =
-    `${mappedRows.length} recipient${mappedRows.length !== 1 ? "s" : ""} loaded`;
+    `${mappedRows.length} recipient${mappedRows.length !== 1 ? "s" : ""}`;
 
   populateFilterSortBar(Object.keys(mappedRows[0] || {}).filter(k => !k.startsWith("_")));
   renderPreviewTable(parsedRecipients);
@@ -2986,7 +3259,7 @@ function getAccessToken() {
 
 function getTokenViaDialog() {
   return new Promise((resolve, reject) => {
-    const dialogUrl = "https://leighton-grey.github.io/mail-merge-addin/auth-dialog.html?v=5";
+    const dialogUrl = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1) + 'auth-dialog.html?v=5';
     Office.context.ui.displayDialogAsync(
       dialogUrl,
       { height: 60, width: 35, promptBeforeOpen: false },
@@ -3947,6 +4220,7 @@ async function handleMergeClick() {
     parseAndPreview();
     if (parsedRecipients.length === 0) {
       log("No valid recipients found. Check your CSV format.", "error");
+      showToast("No valid recipients found. Make sure your CSV has an 'email' column with valid addresses.", "error");
       return;
     }
   }
@@ -4021,6 +4295,7 @@ async function handleMergeClick() {
   }
   if (validRaw.length === 0) {
     log("No valid email addresses found.", "error");
+    showToast("No valid email addresses found. Check your recipient list.", "error");
     return;
   }
 
@@ -4297,7 +4572,7 @@ async function handleMergeClick() {
     lsRemove(LS_KEY_CSV);
     document.getElementById("csvInput").value = "";
     parsedRecipients = [];
-    document.getElementById("recipientCount").textContent = "";
+    document.getElementById("recipientCount").textContent = "0 recipients";
     document.getElementById("previewTable").classList.add("hidden");
     log("CSV cleared from local storage after successful send.", "info");
   }
@@ -4430,7 +4705,7 @@ function initOptOutUI() {
   const optoutImportBtn = document.getElementById("optoutImportBtn");
   if (optoutImportBtn) {
     optoutImportBtn.addEventListener("click", function() {
-      if (!parsedRecipients.length) { log("Load a CSV first.", "warning"); return; }
+      if (!parsedRecipients.length) { log("Load a CSV first.", "warning"); showToast("Load a CSV file first from the Recipients tab.", "warning"); return; }
       const list = getOptOutList();
       let added = 0;
       for (const r of parsedRecipients) {
@@ -4833,7 +5108,7 @@ async function handleBroadcast() {
   broadcastInProgress = true;
   try {
   const rawAll = getFilteredSortedRecipients();
-  if (!rawAll.length) { log("No recipients loaded.", "warning"); return; }
+  if (!rawAll.length) { log("No recipients loaded.", "warning"); showToast("No recipients loaded. Load a CSV file from the Recipients tab first.", "warning"); return; }
 
   // L3: filter skip_if rows (same logic as validateRecipients)
   const rawValid = rawAll.filter(r => {
@@ -4875,7 +5150,7 @@ async function handleBroadcast() {
   const skipped = afterOptOut.length - validEmails.length;
   if (skipped > 0) log(`Broadcast: ${skipped} row(s) with invalid email skipped.`, "warning");
 
-  if (!validEmails.length) { log("No valid recipients for broadcast.", "warning"); return; }
+  if (!validEmails.length) { log("No valid recipients for broadcast.", "warning"); showToast("No valid recipients for broadcast. Check your recipient list.", "warning"); return; }
 
   // Duplicate guard
   const recentDupes = checkDuplicateSendHistory(validEmails);
@@ -5048,9 +5323,9 @@ function updateRateLimitBadge() {
 /* ─── SIMULATE / DRY-RUN MODE (Feature 10) ─────────────────────── */
 
 async function handleSimulate() {
-  if (!parsedRecipients.length) { log("Load a CSV first.", "warning"); return; }
+  if (!parsedRecipients.length) { log("Load a CSV first.", "warning"); showToast("Load a CSV file first from the Recipients tab.", "warning"); return; }
   const valid = getFilteredSortedRecipients();
-  if (!valid.length) { log("No recipients match current filter.", "warning"); return; }
+  if (!valid.length) { log("No recipients match current filter.", "warning"); showToast("No recipients match the current filter. Try clearing your filters.", "warning"); return; }
 
   const simBtn = document.getElementById("simulateBtn");
   if (simBtn) simBtn.disabled = true;
@@ -5133,7 +5408,7 @@ async function searchDirectory(query) {
     );
     renderDirectoryList();
   } catch(err) {
-    el.innerHTML = `<p style="padding:8px;color:#eb5757;">Search failed: ${err.message}</p>`;
+    el.innerHTML = `<p style="padding:8px;color:#eb5757;">Search failed: ${escapeHtml(err.message)}</p>`;
   }
 }
 
@@ -5234,6 +5509,7 @@ async function handleInsertField() {
 async function handleCheckErrors() {
   if (!parsedRecipients.length) {
     log("Load a CSV first before checking for errors.", "warning");
+    showToast("Load a CSV file from the Recipients tab before running the pre-flight check.", "warning");
     return;
   }
 
@@ -5386,7 +5662,7 @@ function renderEditTable() {
   grid.querySelectorAll(".edit-col-header-input").forEach(function(input) {
     input.addEventListener("change", function() {
       const col = parseInt(this.dataset.col, 10);
-      const trimmed = this.value.trim();
+      const trimmed = this.value.trim().toLowerCase();
       editTableHeaders[col] = trimmed || editTableHeaders[col];
       this.value = editTableHeaders[col];
     });
@@ -5414,7 +5690,7 @@ function flushEditTableInputs() {
   const grid = document.getElementById("editTableGrid");
   grid.querySelectorAll(".edit-col-header-input").forEach(function(input) {
     const col = parseInt(input.dataset.col, 10);
-    const trimmed = input.value.trim();
+    const trimmed = input.value.trim().toLowerCase();
     if (trimmed) editTableHeaders[col] = trimmed;
   });
   grid.querySelectorAll(".edit-cell-input").forEach(function(input) {
@@ -5424,7 +5700,7 @@ function flushEditTableInputs() {
 
 function editTableAddColumn() {
   const input = document.getElementById("newColNameInput");
-  const name  = (input ? input.value.trim() : "");
+  const name  = (input ? input.value.trim().toLowerCase() : "");
   if (!name) {
     log("Enter a column name in the box next to '+ Add column'.", "warning");
     if (input) input.focus();
@@ -5467,7 +5743,7 @@ function saveEditTableChanges() {
 function refreshAfterTableEdit() {
   const headers = editTableHeaders.slice();
   document.getElementById("recipientCount").textContent =
-    parsedRecipients.length + ' recipient' + (parsedRecipients.length !== 1 ? 's' : '') + ' loaded';
+    parsedRecipients.length + ' recipient' + (parsedRecipients.length !== 1 ? 's' : '');
   const testRowSel = document.getElementById("testRowSelect");
   if (testRowSel) {
     testRowSel.innerHTML = parsedRecipients.map(function(r, i) {
@@ -5477,7 +5753,7 @@ function refreshAfterTableEdit() {
   }
   headers.forEach(function(h) {
     const tag = '{{' + h + '}}';
-    if (!DEFAULT_TAGS.includes(tag)) addTagToBar(tag);
+    if (!DEFAULT_TAGS.includes(tag)) addTagToBar(tag, undefined, false);
   });
   populateFilterSortBar(headers);
   populateInsertFieldSelect(headers);

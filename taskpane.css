@@ -134,40 +134,41 @@ body {
   /* 3-stop purple gradient matching the accent palette */
   background: linear-gradient(135deg, #6C62D4 0%, #534AB7 45%, #3D35A0 100%);
   color: #fff;
-  padding: 12px 16px 12px 14px;  /* slightly less left-padding to optically align with icon */
+  padding: 10px 14px;
+  margin: 0;
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-shrink: 0;                  /* never squish the header vertically */
-  box-shadow: 0 3px 12px rgba(61,53,160,0.32);  /* purple drop-shadow below header */
+  flex-shrink: 0;
+  border-radius: 0 0 16px 16px;  /* flush top, rounded bottom corners */
+  box-shadow: 0 4px 16px rgba(61,53,160,0.28);
 }
 
-/* Square pill wrapper for the app logo — frosted-glass look via
-   semi-transparent white background so logo pops on the gradient */
+/* Square pill wrapper for the app logo */
 .header-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  overflow: hidden;   /* clip the <img> to the rounded corners */
-  flex-shrink: 0;     /* never let the icon compress */
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  overflow: hidden;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255,255,255,0.18);          /* frosted tint */
-  box-shadow: 0 1px 4px rgba(0,0,0,0.18);     /* subtle lift */
+  background: rgba(255,255,255,0.18);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.18);
 }
 
 .header-icon img {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;  /* match wrapper radius so no square corners bleed through */
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
 }
 
 .header-title {
   font-size: 14px;
   font-weight: 700;
-  letter-spacing: -0.01em;  /* tight tracking looks more modern at this size */
-  flex: 1;                   /* consume remaining space, pushing any trailing actions right */
+  letter-spacing: -0.01em;
+  flex: 1;
 }
 
 /* ─── Tab Bar ─────────────────────────────────────────────────────
@@ -293,6 +294,18 @@ body {
   font-size: 11.5px;
   color: var(--text-muted);  /* used for things like "(1.5 s between batches)" next to a label */
 }
+.csv-optional-toggle {
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 10px;
+  white-space: nowrap;
+  user-select: none;
+}
+.csv-optional-toggle:hover { text-decoration: underline; }
+.csv-optional-list {
+  display: inline;
+}
+.csv-optional-list.hidden { display: none; }
 
 /* ─── Inputs ──────────────────────────────────────────────────────
    .input        — full-width text / number input
@@ -458,6 +471,9 @@ body {
   box-shadow: 0 1px 4px rgba(91,82,200,0.10);
   transition: background var(--transition), border-color var(--transition),
               color var(--transition), box-shadow var(--transition), transform var(--transition);
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;   /* so <a> tags styled as btn-secondary don't show underline */
 }
 
 .btn-secondary:hover {
@@ -612,6 +628,33 @@ body {
    Small pill showing a numeric count (e.g. "12 recipients").
    Used next to section headers to give at-a-glance totals.
    ─────────────────────────────────────────────────────────────── */
+/* 2×2 grid for the "Add recipients another way" button group.
+   All four cells are equal width; the count cell acts as the 4th slot. */
+.alt-recipients-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+
+.alt-recipients-grid .btn-secondary {
+  width: 100%;
+  justify-content: center;
+}
+
+.alt-recipients-count {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 99px;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+
 .count-badge {
   font-size: 11px;
   font-weight: 600;
@@ -1095,9 +1138,17 @@ body {
 
 .edit-table-toolbar {
   display: flex;
+  flex-direction: column;
   gap: 6px;
   margin-bottom: 10px;
-  align-items: center;
+  align-items: stretch;
+}
+.edit-table-toolbar-btns {
+  display: flex;
+  gap: 6px;
+}
+.edit-table-toolbar-btns .btn-primary {
+  flex: 1;
 }
 
 /* Column-name input inside the edit table toolbar — explicitly styled
@@ -1334,66 +1385,82 @@ body {
   border: 1px solid rgba(255,255,255,0.05);  /* barely visible border for definition */
 }
 
-/* ─── Footer disclosure (collapsible privacy note) ───────────────
-   A <details> element that lives INSIDE .app-footer (as its last
-   child) so it expands upward above the footer without creating
-   overlap or layout shift below it.
 
-   The summary button (.footer-disclosure-btn) shows a › chevron
-   that rotates 90° when [open] is set by the browser.
-   The body (.footer-disclosure-body) contains the privacy text.
+/* ─── Toast notifications ────────────────────────────────────────
+   Slide-in banners for user-facing guidance messages.
+   Fixed at the top of the pane so they're always visible.
+   Auto-dismiss via the .toast-hide animation.
    ─────────────────────────────────────────────────────────────── */
-.footer-disclosure {
-  margin: 8px 10px 4px;  /* top margin separates it from the log row above */
+.toast-container {
+  position: fixed;
+  top: 46px;           /* just below the header bar */
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 8px;
+  pointer-events: none;
 }
 
-.footer-disclosure-btn {
+.toast {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  width: 100%;
-  padding: 5px 12px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.45;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+  pointer-events: all;
+  animation: toastSlideIn 0.22s ease-out forwards;
+  border-left: 3px solid transparent;
+  background: #fff;
+  color: var(--text-main);
+  max-width: 100%;
+  word-break: break-word;
+}
+
+.toast-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.toast-msg {
+  flex: 1;
+}
+
+.toast-close {
   background: none;
   border: none;
   cursor: pointer;
-  list-style: none;
-  font-family: inherit;
-  border-radius: 99px;
-  transition: color var(--transition), background var(--transition);
-}
-
-.footer-disclosure-btn::-webkit-details-marker { display: none; }
-
-.footer-disclosure-btn::after {
-  content: '›';
   font-size: 13px;
-  transition: transform var(--transition);
-  display: inline-block;
-}
-
-details[open] .footer-disclosure-btn::after {
-  transform: rotate(90deg);
-}
-
-.footer-disclosure-btn:hover {
-  color: var(--accent);
-  background: var(--accent-bg);
-}
-
-.footer-disclosure-body {
-  margin-top: 6px;
-  padding: 10px 14px;
-  font-size: 11px;
   color: var(--text-muted);
-  line-height: 1.65;
-  text-align: center;
-  background: var(--surface);
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-sm);
+  padding: 0 0 0 4px;
+  flex-shrink: 0;
+  line-height: 1;
+  opacity: 0.6;
+}
+.toast-close:hover { opacity: 1; }
+
+.toast-info    { border-left-color: var(--accent);  background: var(--accent-bg); }
+.toast-success { border-left-color: #27AE60;         background: #F0FFF4; }
+.toast-warning { border-left-color: #F2994A;         background: #FFF8F0; }
+.toast-error   { border-left-color: #EB5757;         background: #FFF5F5; }
+
+.toast-hide {
+  animation: toastSlideOut 0.2s ease-in forwards;
+}
+
+@keyframes toastSlideIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes toastSlideOut {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(-6px); }
 }
 
 /* ─── Code inline ────────────────────────────────────────────── */
@@ -1789,13 +1856,14 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
 .footer-step1-row {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;      /* wrap to next line when pane is too narrow */
+  flex-wrap: wrap;
   gap: 6px;
-  background: linear-gradient(135deg, rgba(245,130,32,0.08) 0%, rgba(245,130,32,0.03) 100%);
-  border: 1px solid rgba(245,130,32,0.25);
-  border-radius: var(--radius);
-  padding: 7px 10px;
+  background: linear-gradient(135deg, rgba(245,130,32,0.13) 0%, rgba(245,130,32,0.05) 60%, rgba(255,255,255,0.6) 100%);
+  border: 1.5px solid rgba(245,130,32,0.35);
+  border-radius: var(--radius-lg);   /* more generous rounding = softer, modern card */
+  padding: 9px 12px;
   margin-bottom: 8px;
+  box-shadow: 0 4px 14px rgba(245,130,32,0.12), 0 1px 3px rgba(0,0,0,0.06);
 }
 
 /* "STEP 1" uppercase label — visually styled like a badge */
@@ -1821,9 +1889,29 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
   max-width: 80px;   /* keep the select narrow so the button has room to breathe */
 }
 
-/* Orange "Send test" button — grows to fill remaining row space */
+/* Compact "Check errors" button — inline beside Row 1 select */
+.btn-step1-check {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 99px;
+  border: 1px solid rgba(245,130,32,0.4);
+  background: rgba(245,130,32,0.08);
+  color: var(--brand-orange-dark);
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+  flex-shrink: 0;
+  transition: background var(--transition), border-color var(--transition);
+}
+.btn-step1-check:hover {
+  background: rgba(245,130,32,0.16);
+  border-color: rgba(245,130,32,0.6);
+}
+
+/* Orange "Send test" button — wraps to its own full-width line */
 .btn-step1 {
-  flex: 1;
+  flex: 1 1 100%;   /* force onto a new line so top row stays compact */
   background: linear-gradient(180deg, var(--brand-orange) 0%, var(--brand-orange-dark) 100%);
   color: #fff;
   border: none;

@@ -1,7 +1,7 @@
 {
   "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
   "id": "a3a648da-9dc0-48ce-948a-ba2434afcadd",
-  "version": "2.6.0",
+  "version": "2.6.1",
   "manifestVersion": "1.17",
   "name": {
     "short": "Mail Merge",
@@ -9,7 +9,7 @@
   },
   "description": {
     "short": "Personalized bulk email directly in New Outlook.",
-    "full": "A free, open-source mail merge add-in for New Outlook. Replaces classic Word-to-Outlook mail merge. Processes all data locally in your browser \u2014 zero data ever touches our servers."
+    "full": "A free, open-source mail merge add-in for New Outlook. Replaces classic Word-to-Outlook mail merge. Processes all data locally in your browser — zero data ever touches our servers."
   },
   "developer": {
     "name": "Promethean IT",
@@ -37,18 +37,17 @@
     }
   },
   "validDomains": [
-    "leighton-grey.github.io"
+    "leighton-grey.github.io",
+    "grey8ghost.github.io"
   ],
   "extensions": [
     {
       "requirements": {
-        "scopes": [
-          "mail"
-        ],
+        "scopes": ["mail"],
         "capabilities": [
           {
             "name": "Mailbox",
-            "minVersion": "1.5"
+            "minVersion": "1.10"
           }
         ]
       },
@@ -58,7 +57,7 @@
             "capabilities": [
               {
                 "name": "Mailbox",
-                "minVersion": "1.5"
+                "minVersion": "1.10"
               }
             ]
           },
@@ -80,9 +79,7 @@
       ],
       "ribbons": [
         {
-          "contexts": [
-            "mailCompose"
-          ],
+          "contexts": ["mailCompose"],
           "tabs": [
             {
               "builtInTabId": "TabDefault",
