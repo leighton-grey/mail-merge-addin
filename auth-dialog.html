@@ -6,11 +6,11 @@
   <title>Mail Merge – Sign In</title>
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'self';
-             script-src 'self' https://appsforoffice.microsoft.com https://alcdn.msauth.net https://cdn.jsdelivr.net 'unsafe-inline';
-             connect-src 'self' https://login.microsoftonline.com https://login.microsoft.com https://graph.microsoft.com https://sts.windows.net https://appsforoffice.microsoft.com;
-             style-src 'self' 'unsafe-inline';
-             img-src 'self' data: https://login.microsoftonline.com;
-             frame-src 'self' https://login.microsoftonline.com https://login.microsoft.com;" />
+             script-src 'self' https://appsforoffice.microsoft.com https://alcdn.msauth.net https://cdn.jsdelivr.net https://*.duosecurity.com https://*.duoapis.com 'unsafe-inline';
+             connect-src 'self' https://login.microsoftonline.com https://login.microsoft.com https://graph.microsoft.com https://sts.windows.net https://appsforoffice.microsoft.com https://*.duosecurity.com https://*.duoapis.com https://duosecurity.com;
+             style-src 'self' 'unsafe-inline' https://*.duosecurity.com;
+             img-src 'self' data: https://login.microsoftonline.com https://*.duosecurity.com https://*.duoapis.com;
+             frame-src 'self' https://login.microsoftonline.com https://login.microsoft.com https://*.duosecurity.com https://*.duoapis.com;" />
 
   <!-- Office.js must load first -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
@@ -416,7 +416,9 @@
         }
       }
 
-      tryMessageParent(10);
+      // 60 × 500 ms = 30 s window — gives Office.js time to reinitialise
+      // after the Microsoft → Duo → Microsoft → auth-dialog redirect chain.
+      tryMessageParent(60);
     }
 
     var msalInstance = null;
