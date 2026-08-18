@@ -3259,13 +3259,44 @@ function getAccessToken() {
 
 function getTokenViaDialog() {
   return new Promise((resolve, reject) => {
-    const dialogUrl = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1) + 'auth-dialog.html?v=5';
+    const dialogUrl = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1) + 'auth-dialog.html?v=6';
+
+    // Clear any stale localStorage result before opening the dialog
+    try { localStorage.removeItem('mm_auth_result'); } catch(e) {}
+
+    let settled = false;
+    let lsPoller = null;
+
+    function settle(fn, value) {
+      if (settled) return;
+      settled = true;
+      if (lsPoller) { clearInterval(lsPoller); lsPoller = null; }
+      try { localStorage.removeItem('mm_auth_result'); } catch(e) {}
+      fn(value);
+    }
+
+    // Fallback for legacy Mac Outlook: messageParent is unavailable after dialog load,
+    // so the auth dialog writes its result to localStorage. Poll for it here.
+    lsPoller = setInterval(() => {
+      try {
+        const raw = localStorage.getItem('mm_auth_result');
+        if (!raw) return;
+        const msg = JSON.parse(raw);
+        if (!msg.ts || Date.now() - msg.ts > 60000) return; // ignore if older than 60s
+        if (msg.type === 'token') {
+          settle(resolve, msg.token);
+        } else {
+          settle(reject, new Error(msg.message || 'Authentication failed'));
+        }
+      } catch(e) {}
+    }, 500);
+
     Office.context.ui.displayDialogAsync(
       dialogUrl,
       { height: 60, width: 35, promptBeforeOpen: false },
       (asyncResult) => {
         if (asyncResult.status === Office.AsyncResultStatus.Failed) {
-          reject(new Error("Could not open sign-in dialog: " + asyncResult.error.message));
+          settle(reject, new Error("Could not open sign-in dialog: " + asyncResult.error.message));
           return;
         }
         const dialog = asyncResult.value;
@@ -3274,17 +3305,17 @@ function getTokenViaDialog() {
           try {
             const msg = JSON.parse(arg.message);
             if (msg.type === "token") {
-              resolve(msg.token);
+              settle(resolve, msg.token);
             } else {
-              reject(new Error(msg.message || "Authentication failed"));
+              settle(reject, new Error(msg.message || "Authentication failed"));
             }
           } catch {
-            reject(new Error("Invalid response from auth dialog"));
+            settle(reject, new Error("Invalid response from auth dialog"));
           }
         });
         dialog.addEventHandler(Office.EventType.DialogEventReceived, (arg) => {
           // 12006 = user closed the dialog manually
-          reject(new Error(arg.error === 12006 ? "Sign-in cancelled" : "Dialog closed unexpectedly (error " + arg.error + ")"));
+          settle(reject, new Error(arg.error === 12006 ? "Sign-in cancelled" : "Dialog closed unexpectedly (error " + arg.error + ")"));
         });
       }
     );
