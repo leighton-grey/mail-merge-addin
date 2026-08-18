@@ -480,11 +480,28 @@
           }
         }
 
-        // Redirect to Microsoft sign-in
-        setStep(4, "Redirecting to Microsoft…");
-        dbg("calling acquireTokenRedirect...");
-        await msalInstance.acquireTokenRedirect({ scopes: SCOPES });
-        dbg("acquireTokenRedirect returned (page navigating away)");
+        // Popup first — keeps dialog page alive so Office.context.ui stays intact
+        // (redirect kills the page and legacy Mac Outlook loses messageParent on reload)
+        setStep(4, "Opening Microsoft sign-in…");
+        dbg("trying acquireTokenPopup...");
+        try {
+          var popupResponse = await msalInstance.acquireTokenPopup({ scopes: SCOPES });
+          dbg("popup token OK", "log-ok");
+          setStep(5, "Signed in — returning to Mail Merge…");
+          sendToParent({ type: "token", token: popupResponse.accessToken });
+          return;
+        } catch (popupErr) {
+          var pCode = popupErr.errorCode || "";
+          dbg("popup error: " + pCode);
+          // Only fall back to redirect if the popup was actually blocked/unavailable
+          if (pCode === "popup_window_error" || pCode === "empty_window_error") {
+            dbg("Popup blocked — falling back to redirect...");
+            await msalInstance.acquireTokenRedirect({ scopes: SCOPES });
+            dbg("acquireTokenRedirect called (page navigating away)");
+          } else {
+            throw popupErr;
+          }
+        }
 
       } catch (e) {
         var code = e.errorCode || "";
