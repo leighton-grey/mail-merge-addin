@@ -5859,6 +5859,9 @@ async function showPreSendConfirmation(recipients, batchDelayMs, scheduledCount)
   const subjectTemplate = document.getElementById("subjectInput")?.value || "";
   let firstSubjectPreview = "";
   if (subjectTemplate && typeof personalize === "function") {
+    // escapeValues=false: subject is plain text — escapeHtml() is applied at the
+    // display layer below (line ~5870). Passing true here would double-escape merge
+    // values (e.g. "O'Brien" → "&amp;#39;Brien" instead of "O'Brien").
     try { firstSubjectPreview = personalize(subjectTemplate, first, false); } catch(e) { firstSubjectPreview = subjectTemplate; }
   }
 
@@ -6941,6 +6944,9 @@ async function handleImportContacts() {
     contactsData = allContacts;
     renderContactsList(contactsData);
   } catch (err) {
+    // escapeHtml() prevents XSS: Graph error messages can contain user-influenced
+    // strings (e.g. email addresses, header values) that must not be injected raw
+    // into innerHTML.
     document.getElementById("contactsList").innerHTML =
       `<p style="padding:8px;color:#eb5757;">Failed to load contacts: ${escapeHtml(err.message)}</p>`;
   }
