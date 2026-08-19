@@ -1,9 +1,98 @@
 <!DOCTYPE html>
+<!--
+  auth-dialog.html — Mail Merge MSAL Authentication Dialog
+  =========================================================
+  This file runs inside an Office dialog popup (a separate browser-engine window
+  spawned by Office.context.ui.displayDialogAsync in taskpane.js).
+
+  On Mac Outlook each Office window is an isolated WKWebView — this dialog and the
+  taskpane are separate processes with no shared memory. The only communication
+  channels between them are:
+    1. Office.context.ui.messageParent() — sends a string from dialog → taskpane.
+       Fast and clean, but unavailable in legacy Mac Outlook after a redirect chain.
+    2. localStorage — available because both pages share the same GitHub Pages origin
+       (leighton-grey.github.io). auth-dialog writes the token here; taskpane polls it.
+
+  Auth flow:
+    1. Page loads, Office.js initialises (Office.onReady fires)
+    2. MSAL initialises with the tenant's Azure app registration details
+    3. handleRedirectPromise() checks whether we're returning from a Microsoft redirect
+       (e.g., after Duo MFA) — if so, the token is already in the response
+    4. If no redirect response: try silent token acquisition for cached accounts
+    5. If silent fails: open a popup (preferred — keeps this page alive so messageParent works)
+    6. If popup is blocked: fall back to acquireTokenRedirect (navigates this page away
+       through Microsoft → Duo → back; messageParent won't work after this, so we use localStorage)
+    7. Token (or error) sent back to taskpane via messageParent + localStorage bridge
+-->
 <html lang="en">
 <head>
+  <!-- UTF-8 character encoding — always declare this first so the browser parses
+       the rest of the document correctly before encountering any special characters -->
   <meta charset="UTF-8">
+
+  <!-- Viewport meta tag — controls how the page scales on different screen sizes.
+       width=device-width: use the actual device width as the viewport width.
+       initial-scale=1.0: don't zoom in or out on first load.
+       Without this, mobile/tablet Outlook would render the dialog at desktop scale and
+       the user would need to pinch-zoom to read it. -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
   <title>Mail Merge – Sign In</title>
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       CONTENT SECURITY POLICY (CSP)
+       ══════════════════════════════════════════════════════════════════════
+       CSP is a browser security feature that whitelists exactly which sources
+       this page is allowed to load resources from. Any resource from an origin
+       not listed here is blocked by the browser before the network request even
+       happens. This is a critical XSS (Cross-Site Scripting) defence layer.
+
+       Why each directive matters:
+
+       default-src 'self'
+         Catch-all fallback for any resource type not explicitly listed below.
+         'self' means "the same origin as this page" (leighton-grey.github.io).
+         Anything not covered by a more specific directive falls back to this.
+
+       script-src
+         Controls which JavaScript sources are allowed to execute on this page.
+         - 'self'                         : our own JS files on GitHub Pages
+         - appsforoffice.microsoft.com    : Office.js SDK (required for messageParent)
+         - alcdn.msauth.net               : Microsoft's MSAL CDN (fallback)
+         - cdn.jsdelivr.net               : jsDelivr CDN (primary MSAL source)
+         - *.duosecurity.com / *.duoapis.com : Duo Universal Prompt JS — required for
+                                              the Duo MFA iframe to load and function
+         - 'unsafe-inline'                : REQUIRED because our auth logic is inline
+                                            <script> blocks (no build step/bundler).
+                                            Ideally we'd use nonces, but that requires
+                                            server-side rendering. Acceptable risk here
+                                            since the only HTML we serve is our own.
+
+       connect-src
+         Controls which URLs JavaScript on this page can fetch/XHR to.
+         - login.microsoftonline.com : MSAL auth endpoints, token exchange
+         - login.microsoft.com       : Alternate Microsoft login domain
+         - graph.microsoft.com       : Microsoft Graph API (not called from dialog directly,
+                                       but MSAL may hit token validation endpoints)
+         - sts.windows.net           : Azure AD Security Token Service
+         - appsforoffice.microsoft.com : Office.js telemetry
+         - *.duosecurity.com / duosecurity.com / *.duoapis.com : Duo API endpoints
+                                         (Duo's Universal Prompt makes XHR calls to
+                                          api-XXXXXXXX.duosecurity.com during MFA)
+
+       style-src
+         Controls CSS sources. 'unsafe-inline' allows the <style> block in this page.
+         *.duosecurity.com: Duo injects its own <style> elements during MFA.
+
+       img-src
+         Controls image sources. data: allows inline base64 images (MSAL status icons).
+         Microsoft and Duo domains for their login UI graphics.
+
+       frame-src
+         Controls which domains can be loaded in <iframe> elements.
+         MSAL's popup flow and Duo's Universal Prompt both use iframes — they must
+         be whitelisted here or the browser silently blocks the iframe and auth fails.
+  -->
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'self';
              script-src 'self' https://appsforoffice.microsoft.com https://alcdn.msauth.net https://cdn.jsdelivr.net https://*.duosecurity.com https://*.duoapis.com 'unsafe-inline';
@@ -12,152 +101,182 @@
              img-src 'self' data: https://login.microsoftonline.com https://*.duosecurity.com https://*.duoapis.com;
              frame-src 'self' https://login.microsoftonline.com https://login.microsoft.com https://*.duosecurity.com https://*.duoapis.com;" />
 
-  <!-- Office.js must load first -->
+  <!-- Office.js MUST load before any other script on this page.
+       It provides the Office.context.ui.messageParent() function that sends
+       the token back to the taskpane. Loading it synchronously (no async/defer)
+       ensures it's available by the time our inline scripts run.
+       The version "1" here means "latest stable v1.x" — Microsoft manages the CDN. -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
   <style>
+    /* CSS reset: remove browser default margins/padding and use border-box sizing.
+       box-sizing: border-box means padding and border are included in width/height
+       calculations — avoids unexpected overflow when we set explicit sizes. */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-      min-height: 100vh;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; /* Segoe UI = Windows system font; fallbacks for Mac/Linux */
+      min-height: 100vh;     /* Fill the full viewport height even if content is short */
+      /* Dark gradient background — creates depth without an image file */
       background: linear-gradient(140deg, #0C0A1A 0%, #16123A 45%, #0D1B38 100%);
       display: flex;
       flex-direction: column;
-      align-items: center;
-      justify-content: center;
+      align-items: center;     /* Horizontally centre the card */
+      justify-content: center; /* Vertically centre the card */
       padding: 20px;
       color: #fff;
+      /* Smooth font rendering on macOS — prevents jagged text on dark backgrounds */
       -webkit-font-smoothing: antialiased;
-      overflow: hidden;
+      overflow: hidden; /* Prevents scrollbars from the animated orbs that extend outside the viewport */
     }
 
-    /* ── Ambient background orbs ─────────────────────── */
+    /* ── Ambient background orbs ─────────────────────────────────────────────
+       Three blurred circles positioned around the edges of the viewport.
+       They drift slowly via CSS animation to give the page a "living" feel.
+       pointer-events: none — they don't intercept mouse clicks.
+       z-index: 0 — they sit behind the card (card is z-index: 1). */
     .bg-orb {
-      position: fixed;
-      border-radius: 50%;
-      filter: blur(70px);
-      pointer-events: none;
-      z-index: 0;
+      position: fixed;        /* Fixed to the viewport, not the document — they don't scroll */
+      border-radius: 50%;     /* Makes the div a circle */
+      filter: blur(70px);     /* Heavy blur creates a soft glow effect */
+      pointer-events: none;   /* Clicks pass through to the card behind */
+      z-index: 0;             /* Behind the card */
     }
     .bg-orb-1 {
       width: 340px; height: 340px;
-      background: rgba(83,74,183,0.25);
-      top: -100px; right: -100px;
-      animation: drift 9s ease-in-out infinite;
+      background: rgba(83,74,183,0.25);   /* Brand purple at 25% opacity */
+      top: -100px; right: -100px;         /* Partially off-screen top-right */
+      animation: drift 9s ease-in-out infinite; /* Slow gentle drift loop */
     }
     .bg-orb-2 {
       width: 220px; height: 220px;
-      background: rgba(245,130,32,0.18);
+      background: rgba(245,130,32,0.18);  /* Brand orange at 18% opacity */
       bottom: -70px; left: -50px;
-      animation: drift 11s ease-in-out infinite reverse;
+      animation: drift 11s ease-in-out infinite reverse; /* Same drift, opposite direction */
     }
     .bg-orb-3 {
       width: 160px; height: 160px;
-      background: rgba(83,74,183,0.12);
+      background: rgba(83,74,183,0.12);   /* Brand purple, more subtle */
       bottom: 30%; right: -40px;
-      animation: drift 7s ease-in-out infinite 2s;
+      animation: drift 7s ease-in-out infinite 2s; /* Faster, starts 2s delayed for variety */
     }
+    /* The drift keyframe: translates and scales slightly to create the floating effect */
     @keyframes drift {
       0%, 100% { transform: translate(0, 0) scale(1); }
       50%       { transform: translate(16px, -20px) scale(1.05); }
     }
 
-    /* ── Card ────────────────────────────────────────── */
+    /* ── Card ────────────────────────────────────────────────────────────────
+       The frosted glass card that contains the sign-in UI.
+       Subtle semi-transparent background + border mimics a glassmorphism look
+       without requiring backdrop-filter (which can have performance issues). */
     .card {
       position: relative;
-      z-index: 1;
-      background: rgba(255,255,255,0.045);
-      border: 1px solid rgba(255,255,255,0.10);
+      z-index: 1;                              /* Above the background orbs */
+      background: rgba(255,255,255,0.045);     /* Almost transparent white tint */
+      border: 1px solid rgba(255,255,255,0.10); /* Faint white border for glass edge */
       border-radius: 24px;
       padding: 44px 36px 30px;
       width: 100%;
-      max-width: 360px;
+      max-width: 360px;                        /* Cap width — doesn't need to be wider */
       text-align: center;
+      /* Layered box-shadow: large outer shadow for depth + inner highlights for glass feel */
       box-shadow:
         0 30px 80px rgba(0,0,0,0.55),
         inset 0 1px 0 rgba(255,255,255,0.12),
         inset 0 -1px 0 rgba(0,0,0,0.2);
     }
 
-    /* ── Icon + pulse rings ──────────────────────────── */
+    /* ── Icon + pulse rings ──────────────────────────────────────────────────
+       The Mail Merge app icon with three animated rings that pulse outward.
+       The rings are absolutely positioned siblings of the icon, all inside
+       .icon-wrap which provides the 80×80px positioning context. */
     .icon-wrap {
       position: relative;
       width: 80px; height: 80px;
-      margin: 0 auto 26px;
+      margin: 0 auto 26px; /* Centre horizontally, space below */
     }
 
-    /* Rings animate outward from the icon */
+    /* Each pulse ring starts at the same size as the icon and expands outward,
+       fading to transparent. The three rings are staggered 0.87s apart (1/3 of
+       the 2.6s cycle) so the animation looks like concentric waves. */
     .pulse-ring {
       position: absolute;
-      inset: 0;
-      border: 1.5px solid rgba(245,130,32,0.55);
-      border-radius: 20px;
+      inset: 0;                                     /* Fill the .icon-wrap container */
+      border: 1.5px solid rgba(245,130,32,0.55);   /* Brand orange ring */
+      border-radius: 20px;                          /* Rounded to match the icon shape */
       animation: pulse-out 2.6s cubic-bezier(0.3,0,0.7,1) infinite;
       pointer-events: none;
     }
-    .pulse-ring:nth-child(2) { animation-delay: 0.87s; }
-    .pulse-ring:nth-child(3) { animation-delay: 1.74s; }
+    .pulse-ring:nth-child(2) { animation-delay: 0.87s; }  /* Second ring: 1/3 cycle offset */
+    .pulse-ring:nth-child(3) { animation-delay: 1.74s; }  /* Third ring: 2/3 cycle offset */
 
     @keyframes pulse-out {
-      0%   { opacity: 0.75; transform: scale(1); }
-      70%  { opacity: 0.2; }
-      100% { opacity: 0;   transform: scale(1.9); }
+      0%   { opacity: 0.75; transform: scale(1); }    /* Start: full opacity, same size as icon */
+      70%  { opacity: 0.2; }                           /* Fade quickly */
+      100% { opacity: 0;   transform: scale(1.9); }   /* End: invisible, expanded 90% outward */
     }
 
     .icon-img {
       position: relative;
-      z-index: 1;
+      z-index: 1;           /* Icon sits above the pulse rings */
       width: 80px; height: 80px;
-      border-radius: 18px;
+      border-radius: 18px;  /* Match the icon asset's own rounded corners */
       box-shadow:
         0 10px 28px rgba(0,0,0,0.45),
-        0 0 0 1px rgba(255,255,255,0.10);
+        0 0 0 1px rgba(255,255,255,0.10); /* Subtle inner highlight ring */
     }
 
-    /* Error state — icon turns red-ish */
+    /* Error state: darken and desaturate the icon when auth fails.
+       Applied by showError() via classList.add("error-state"). */
     .icon-img.error-state { filter: grayscale(0.4) brightness(0.8); }
 
-    /* ── App name + byline ───────────────────────────── */
+    /* ── App name ────────────────────────────────────────────────────────── */
     .app-name {
       font-size: 22px;
       font-weight: 800;
-      letter-spacing: -0.02em;
+      letter-spacing: -0.02em; /* Tight tracking on large bold text looks more polished */
       color: #fff;
       margin-bottom: 5px;
     }
 
-
-
-    /* ── Step label ──────────────────────────────────── */
+    /* ── Step label ──────────────────────────────────────────────────────────
+       The small text below the app name that shows the current auth step.
+       min-height: 20px prevents the card from jumping in size when the label
+       changes between short and long strings. */
     #stepLabel {
       font-size: 13.5px;
-      color: rgba(255,255,255,0.65);
+      color: rgba(255,255,255,0.65); /* Muted white — secondary text */
       margin-bottom: 14px;
       min-height: 20px;
-      transition: opacity 0.25s;
+      transition: opacity 0.25s; /* Fade smoothly when text changes */
     }
 
-    /* ── Progress bar ────────────────────────────────── */
+    /* ── Progress bar ────────────────────────────────────────────────────────
+       A thin track with a coloured fill that advances through the auth steps.
+       The track is the background; #progressFill is the orange-purple gradient
+       bar that grows as steps progress. */
     .progress-track {
-      background: rgba(255,255,255,0.08);
-      border-radius: 99px;
+      background: rgba(255,255,255,0.08); /* Faint track background */
+      border-radius: 99px;                /* Pill shape */
       height: 5px;
-      overflow: hidden;
+      overflow: hidden;                   /* Clip the fill bar so it doesn't overflow the rounded corners */
       margin-bottom: 18px;
     }
 
     #progressFill {
       height: 100%;
       border-radius: 99px;
-      width: 0%;
-      background: linear-gradient(90deg, #534AB7 0%, #F58220 100%);
-      box-shadow: 0 0 12px rgba(245,130,32,0.5);
+      width: 0%;                          /* Starts at 0% — setStep() updates this */
+      background: linear-gradient(90deg, #534AB7 0%, #F58220 100%); /* Brand purple → orange */
+      box-shadow: 0 0 12px rgba(245,130,32,0.5); /* Orange glow on the tip of the bar */
+      /* Smooth width transition — the bar slides forward rather than jumping */
       transition: width 0.55s cubic-bezier(0.4,0,0.2,1);
-      position: relative;
+      position: relative; /* Needed for the ::after shimmer to position correctly */
     }
 
-    /* Shimmer on the fill */
+    /* Shimmer effect on the progress bar — a bright streak that scrolls left-to-right
+       giving the impression of energy/motion while the bar is filling. */
     #progressFill::after {
       content: '';
       position: absolute;
@@ -165,19 +284,22 @@
       background: linear-gradient(
         90deg,
         transparent 0%,
-        rgba(255,255,255,0.4) 50%,
+        rgba(255,255,255,0.4) 50%, /* Bright white flash at the midpoint */
         transparent 100%
       );
-      background-size: 200% 100%;
+      background-size: 200% 100%;  /* Make the gradient twice as wide as the element */
       animation: shimmer 1.8s ease infinite;
     }
 
     @keyframes shimmer {
-      0%   { background-position: -200% 0; }
-      100% { background-position:  200% 0; }
+      0%   { background-position: -200% 0; } /* Start the flash off-screen left */
+      100% { background-position:  200% 0; } /* End off-screen right */
     }
 
-    /* ── Step dots ───────────────────────────────────── */
+    /* ── Step dots ───────────────────────────────────────────────────────────
+       Five small circles that represent the five auth stages. The active stage
+       gets the orange colour; completed stages get a muted orange; future stages
+       are a barely visible grey. setStep() updates the classes on each dot. */
     .step-dots {
       display: flex;
       justify-content: center;
@@ -188,54 +310,61 @@
     .dot {
       width: 7px; height: 7px;
       border-radius: 50%;
-      background: rgba(255,255,255,0.13);
-      transition: all 0.35s cubic-bezier(0.4,0,0.2,1);
+      background: rgba(255,255,255,0.13); /* Inactive: nearly invisible grey dot */
+      transition: all 0.35s cubic-bezier(0.4,0,0.2,1); /* Smooth state transitions */
     }
 
     .dot.active {
-      background: #F58220;
-      box-shadow: 0 0 10px rgba(245,130,32,0.8);
-      transform: scale(1.35);
+      background: #F58220;                        /* Brand orange — current step */
+      box-shadow: 0 0 10px rgba(245,130,32,0.8);  /* Orange glow on active dot */
+      transform: scale(1.35);                     /* Slightly larger to stand out */
     }
 
     .dot.done {
-      background: rgba(245,130,32,0.4);
-      transform: scale(1);
+      background: rgba(245,130,32,0.4); /* Muted orange — completed step */
+      transform: scale(1);              /* Back to normal size */
     }
 
-    /* ── Error box ───────────────────────────────────── */
+    /* ── Error box ───────────────────────────────────────────────────────────
+       A red-tinted box that appears when auth fails. Hidden by default (display:none);
+       shown by showError() by setting box.style.display = "block". */
     #errorBox {
       display: none;
-      background: rgba(192,37,42,0.14);
+      background: rgba(192,37,42,0.14);   /* Subtle red tint */
       border: 1px solid rgba(192,37,42,0.30);
       border-radius: 10px;
       padding: 11px 14px;
       font-size: 12.5px;
-      color: #F07070;
+      color: #F07070;         /* Bright red text for readability on the dark card */
       margin-bottom: 18px;
       text-align: left;
       line-height: 1.55;
     }
 
-    /* ── Divider ─────────────────────────────────────── */
+    /* ── Divider ─────────────────────────────────────────────────────────── */
     .divider {
       height: 1px;
-      background: rgba(255,255,255,0.07);
-      margin: 0 -36px 14px;
+      background: rgba(255,255,255,0.07); /* Barely visible hairline */
+      margin: 0 -36px 14px; /* Bleed out to the card edges (negative margin = card padding) */
     }
 
-    /* ── Debug log ───────────────────────────────────── */
+    /* ── Debug log ───────────────────────────────────────────────────────────
+       A scrollable monospace log at the bottom of the card. Each auth step
+       appends a line here via dbg(). This is visible in the deployed add-in —
+       it's intentionally left in for transparency and easier IT support debugging.
+       max-height + overflow-y: scroll keeps it compact while allowing full history. */
     #debugLog {
       width: 100%;
       max-height: 120px;
       overflow-y: auto;
-      font-family: 'Cascadia Code', 'Consolas', monospace;
+      font-family: 'Cascadia Code', 'Consolas', monospace; /* Monospace for log readability */
       font-size: 10px;
-      color: rgba(255,255,255,0.28);
+      color: rgba(255,255,255,0.28); /* Very muted — secondary info, not primary UI */
       text-align: left;
       line-height: 1.75;
     }
 
+    /* Custom scrollbar styling — thin and subtle to match the dark theme */
     #debugLog::-webkit-scrollbar { width: 3px; }
     #debugLog::-webkit-scrollbar-track { background: transparent; }
     #debugLog::-webkit-scrollbar-thumb {
@@ -243,25 +372,30 @@
       border-radius: 99px;
     }
 
+    /* Individual log lines: nowrap + ellipsis prevents long error messages from
+       breaking the card layout. The user can scroll horizontally to read full messages
+       if needed, but truncation keeps the UI clean. */
     .log-line {
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .log-err { color: rgba(240,112,112,0.75); }
-    .log-ok  { color: rgba(111,207,151,0.6); }
+    .log-err { color: rgba(240,112,112,0.75); } /* Error lines: red tint */
+    .log-ok  { color: rgba(111,207,151,0.6);  } /* Success lines: green tint */
   </style>
 </head>
 <body>
 
-  <!-- Ambient orbs -->
+  <!-- Ambient background orbs — purely decorative, no interaction -->
   <div class="bg-orb bg-orb-1"></div>
   <div class="bg-orb bg-orb-2"></div>
   <div class="bg-orb bg-orb-3"></div>
 
   <div class="card">
 
-    <!-- Icon with pulse rings -->
+    <!-- Icon with three animated pulse rings.
+         The rings are :nth-child(1), (2), (3); the icon is the fourth child.
+         All four share the same position: relative/absolute stack inside .icon-wrap. -->
     <div class="icon-wrap">
       <div class="pulse-ring"></div>
       <div class="pulse-ring"></div>
@@ -271,15 +405,16 @@
 
     <div class="app-name">Mail Merge</div>
 
-    <!-- Current step label -->
+    <!-- Current step description — updated by setStep() as auth progresses -->
     <div id="stepLabel">Loading authentication…</div>
 
-    <!-- Progress bar -->
+    <!-- Progress bar track — #progressFill width is driven by setStep() -->
     <div class="progress-track">
       <div id="progressFill"></div>
     </div>
 
-    <!-- Step dots (5 stages) -->
+    <!-- Five step dots: Loading, Office ready, Initialising, Checking session, Signing in.
+         id="dot0" through id="dot4" — referenced by setStep() loop. -->
     <div class="step-dots">
       <div class="dot active" id="dot0" title="Loading"></div>
       <div class="dot"        id="dot1" title="Office ready"></div>
@@ -288,38 +423,76 @@
       <div class="dot"        id="dot4" title="Signing in"></div>
     </div>
 
-    <!-- Error box (hidden until error) -->
+    <!-- Error box: hidden until showError() is called.
+         Shows the human-readable error message and changes the progress bar to red. -->
     <div id="errorBox"></div>
 
     <div class="divider"></div>
 
-    <!-- Inline debug log -->
+    <!-- Debug log: each dbg() call appends a timestamped line here.
+         Useful for IT admins diagnosing auth failures without needing DevTools. -->
     <div id="debugLog"></div>
 
   </div>
 
-  <!-- ── Early logging — fires before MSAL loads ────────────── -->
+  <!-- ══════════════════════════════════════════════════════════════════════
+       EARLY LOGGING SCRIPT — fires immediately on page load, before MSAL loads.
+       This script block is intentionally placed BEFORE the MSAL <script> tag so
+       the debug log is available from the very first millisecond. If MSAL fails
+       to load from the CDN, we can still log useful error messages.
+  ══════════════════════════════════════════════════════════════════════ -->
   <script>
+    // Grab the debug log container once, at top level — faster than getElementById
+    // inside every dbg() call, and works before the DOM is fully loaded because
+    // this script runs after the #debugLog element is defined in the HTML above.
     var logEl = document.getElementById("debugLog");
 
+    /**
+     * dbg(msg, cls) — appends a timestamped line to the debug log.
+     * @param {string} msg - the log message to display
+     * @param {string} [cls] - optional CSS class: "log-ok" (green) or "log-err" (red)
+     *
+     * We use a <div> per line instead of textContent += so each line can have its own
+     * CSS class (for colour-coding) and the overflow: hidden + text-overflow: ellipsis
+     * on .log-line applies per-line rather than to the whole block.
+     *
+     * .toISOString().slice(11, 22) extracts just the time portion (HH:MM:SS.mmm)
+     * from the ISO timestamp string — enough context without the full date.
+     */
     function dbg(msg, cls) {
       var d = document.createElement("div");
+      // Apply base class plus optional colour class (e.g. "log-line log-err")
       d.className = "log-line" + (cls ? " " + cls : "");
       d.textContent = new Date().toISOString().slice(11, 22) + " " + msg;
       logEl.appendChild(d);
+      // Auto-scroll to the bottom so the most recent log line is always visible.
+      // scrollTop = scrollHeight is the standard pattern for this.
       logEl.scrollTop = logEl.scrollHeight;
     }
 
-    // Step-progress helpers
+    // ── Step progress data ────────────────────────────────────────────────────
+    // Parallel arrays: STEPS[n] is the label text for step n; PROGRESS[n] is the
+    // percentage width of the progress bar at that step. Five steps = 0..4.
     var STEPS = [
-      "Loading authentication…",
-      "Preparing Office runtime…",
-      "Initialising secure session…",
-      "Checking for existing sign-in…",
-      "Redirecting to Microsoft…"
+      "Loading authentication…",          // Step 0: page just loaded, MSAL not yet ready
+      "Preparing Office runtime…",         // Step 1: Office.onReady registered
+      "Initialising secure session…",      // Step 2: MSAL.initialize() called
+      "Checking for existing sign-in…",    // Step 3: handleRedirectPromise() / silent token
+      "Redirecting to Microsoft…"          // Step 4: acquireTokenPopup/Redirect called
     ];
-    var PROGRESS = [12, 28, 52, 72, 92];
+    var PROGRESS = [12, 28, 52, 72, 92]; // Progress bar widths (%) for each step
 
+    /**
+     * setStep(n, labelOverride) — advances the UI to step n.
+     * Updates the step label, progress bar width, and dot states simultaneously.
+     * @param {number} n              - step index 0–4
+     * @param {string} [labelOverride] - optional custom label (overrides STEPS[n])
+     *
+     * Dot state logic:
+     *   i < n  → "done" (completed steps behind current)
+     *   i === n → "active" (current step)
+     *   i > n  → "" (no class — future steps, barely visible grey)
+     */
     function setStep(n, labelOverride) {
       document.getElementById("stepLabel").textContent = labelOverride || STEPS[n] || "";
       document.getElementById("progressFill").style.width = PROGRESS[n] + "%";
@@ -329,26 +502,59 @@
       }
     }
 
+    /**
+     * showError(msg) — transitions the UI to an error state.
+     * Called when auth fails at any stage. It:
+     *   - Stops the pulse ring animations (no point animating on error)
+     *   - Darkens the icon image
+     *   - Turns the progress bar solid red and fills it to 100%
+     *   - Shows the error box with the provided message
+     *   - Logs the error to the debug log (red colour)
+     */
     function showError(msg) {
-      // Stop pulse rings
+      // Pause all three pulse ring animations and fade them out immediately
       var rings = document.querySelectorAll(".pulse-ring");
       rings.forEach(function(r) { r.style.animationPlayState = "paused"; r.style.opacity = "0"; });
+
+      // Apply the error-state class which desaturates and darkens the icon
       document.getElementById("iconImg").classList.add("error-state");
+
+      // Override the gradient fill with a solid red and remove the glow
       document.getElementById("progressFill").style.background = "#C4252A";
       document.getElementById("progressFill").style.boxShadow = "none";
-      document.getElementById("progressFill").style.width = "100%";
+      document.getElementById("progressFill").style.width = "100%"; // Fill the whole bar red
+
+      // Update the step label
       document.getElementById("stepLabel").textContent = "Sign-in failed";
+
+      // Show the error box with the message text
       var box = document.getElementById("errorBox");
-      box.textContent = msg;
+      box.textContent = msg;   // .textContent (not .innerHTML) — safe from XSS
       box.style.display = "block";
+
+      // Also log to the debug panel with red colouring
       dbg("ERROR: " + msg, "log-err");
     }
 
+    // Log the first event and advance to step 0 — confirms the page loaded and JS ran
     dbg("Page loaded — loading MSAL...");
     setStep(0);
   </script>
 
-  <!-- MSAL from jsDelivr (primary) with alcdn fallback -->
+  <!-- ══════════════════════════════════════════════════════════════════════
+       MSAL SCRIPT LOADING — jsDelivr primary, Microsoft alcdn fallback
+       ══════════════════════════════════════════════════════════════════════
+       We load MSAL from jsDelivr first (faster, global CDN). The onerror handler
+       fires if the script fails to load (CDN down, network block, etc.) and
+       attempts to load from Microsoft's own CDN instead.
+
+       crossorigin="anonymous" tells the browser to perform a CORS preflight check.
+       Without it, the browser won't expose error details to the onerror handler —
+       you'd get a "Script error" with no useful information.
+
+       We pin to version 2.38.3 to prevent unexpected breakage from auto-upgrades.
+       Before bumping the version, test in all target Outlook environments.
+  ══════════════════════════════════════════════════════════════════════ -->
   <script
     src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"
     crossorigin="anonymous"
@@ -356,120 +562,270 @@
   </script>
 
   <script>
+    /**
+     * loadMsalFallback() — dynamically injects the MSAL script from Microsoft's alcdn.
+     * Called by the onerror handler on the jsDelivr <script> tag above.
+     * Creates a new <script> element programmatically and appends it to <head>.
+     * The onload handler starts the auth flow once the fallback script has executed.
+     */
     function loadMsalFallback() {
       var s = document.createElement("script");
       s.src = "https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js";
-      s.crossOrigin = "anonymous";
-      s.onload  = function() { dbg("alcdn fallback loaded OK", "log-ok"); startAuth(); };
+      s.crossOrigin = "anonymous"; // Same CORS reason as above
+      s.onload  = function() {
+        dbg("alcdn fallback loaded OK", "log-ok");
+        startAuth(); // Both CDNs define window.msal — we can start regardless of which one loaded
+      };
       s.onerror = function() {
+        // Both CDNs failed — likely a network outage or corporate proxy blocking CDN traffic.
+        // Nothing more we can do; tell the user to check their network.
         dbg("BOTH MSAL CDNs failed!", "log-err");
         showError("Could not load the authentication library. Please check your network connection and try again.");
       };
       document.head.appendChild(s);
     }
 
+    // If MSAL loaded successfully from jsDelivr, log it.
+    // The actual startAuth() call is at the bottom of the next <script> block —
+    // it's separate to avoid timing issues between the jsDelivr load and this check.
     if (typeof msal !== "undefined") {
       dbg("MSAL loaded OK from jsDelivr", "log-ok");
     }
   </script>
 
+  <!-- ══════════════════════════════════════════════════════════════════════
+       MAIN AUTH SCRIPT
+       ══════════════════════════════════════════════════════════════════════
+       This block contains all the authentication logic. It runs after Office.js
+       and MSAL are both loaded and ready.
+  ══════════════════════════════════════════════════════════════════════ -->
   <script>
+    // Office.initialize is a legacy Office.js hook — setting it to a no-op function
+    // prevents Office from throwing "Office.initialize must be defined" errors on
+    // older versions of the Office runtime. The modern equivalent is Office.onReady().
     Office.initialize = function() {};
 
+    // ── Azure App Registration constants ─────────────────────────────────────
+    // These must match the app registration in Entra ID (Azure AD) exactly.
+    // CLIENT_ID  = the Application (client) ID from the Azure portal
+    // TENANT_ID  = the Directory (tenant) ID from the Azure portal
+    // Together they tell MSAL which specific Azure app to authenticate against
+    // and which tenant's users are allowed to sign in.
     const CLIENT_ID    = "d06ae3cf-a7da-4264-b20e-ab8d70c06977";
     const TENANT_ID    = "04ca7ab1-691d-45a2-928f-574b3e3300a0";
-    const REDIRECT_URI = window.location.href.split('?')[0];
-    const SCOPES       = ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"];
 
+    // REDIRECT_URI: after Microsoft authenticates the user (and Duo completes MFA),
+    // it redirects the browser back to this URL with the auth code in the query string.
+    // We strip the query string (everything after "?") from the current page URL so the
+    // redirect always lands on the clean auth-dialog.html page, regardless of the ?v=7
+    // cache-bust param that might be in the current URL.
+    // This MUST match the redirect URI registered in the Azure app registration exactly —
+    // even a trailing slash difference will cause a redirect_uri_mismatch error.
+    const REDIRECT_URI = window.location.href.split('?')[0];
+
+    // SCOPES: the Graph API permissions we need a token for.
+    // Mail.Send  — allows sending email as the signed-in user via POST /me/sendMail
+    // User.Read  — allows reading basic profile info (name, email) via GET /me
+    // These must also be listed as API permissions in the Azure app registration.
+    const SCOPES = ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"];
+
+    /**
+     * sendToParent(data) — sends the auth result back to the taskpane.
+     *
+     * Uses TWO parallel channels for maximum compatibility:
+     *
+     * Channel A: localStorage bridge
+     *   Written FIRST. Works in legacy Mac Outlook where messageParent is unavailable
+     *   after a redirect chain (Microsoft → Duo → back to auth-dialog.html).
+     *   The taskpane's localStorage poller (setInterval every 500 ms) picks this up.
+     *   A timestamp (ts: Date.now()) is included so the taskpane can reject stale
+     *   entries older than 60 seconds.
+     *
+     * Channel B: Office.context.ui.messageParent()
+     *   The standard Office dialog communication API. Works in modern Outlook (OWA,
+     *   Windows Outlook, modern Mac Outlook). The taskpane's DialogMessageReceived
+     *   handler picks this up instantly when it fires.
+     *
+     * The "settle" pattern in taskpane.js ensures only the first channel to arrive
+     * is acted on — the second one is silently ignored.
+     *
+     * @param {{ type: "token", token: string } | { type: "error", message: string }} data
+     */
     function sendToParent(data) {
       dbg("sendToParent → " + data.type);
-      var payload = JSON.stringify(data);
+      var payload = JSON.stringify(data); // Serialise to string for messageParent
 
-      // Write to localStorage first as a fallback channel for legacy Mac Outlook
-      // where Office.context.ui.messageParent is unavailable after dialog loads.
-      // The taskpane polls this key and picks up the result if messageParent never fires.
+      // ── Channel A: write to localStorage ─────────────────────────────────
+      // Object.assign copies all properties from `data` into a new object, then
+      // adds a `ts` timestamp. This avoids mutating the original `data` object.
+      // The taskpane's poller checks `Date.now() - msg.ts > 60000` before trusting
+      // the entry — this prevents stale tokens from a previous session being picked up.
       try {
         localStorage.setItem('mm_auth_result', JSON.stringify(
           Object.assign({}, data, { ts: Date.now() })
         ));
         dbg("localStorage fallback written", "log-ok");
       } catch (lsErr) {
+        // localStorage can fail if the browser is in private/incognito mode or if
+        // storage quota is exceeded. Not a fatal error — Channel B (messageParent)
+        // still works independently.
         dbg("localStorage write failed: " + lsErr.message);
       }
 
+      // ── Channel B: messageParent with retry ──────────────────────────────
+      // In legacy Mac Outlook, after the redirect chain (page navigates away and back),
+      // Office.js needs time to re-initialise. Office.context.ui may not be ready
+      // immediately when auth-dialog.html reloads after the redirect returns.
+      // We poll every 500 ms for up to 30 seconds (60 attempts × 500 ms) waiting
+      // for Office.context.ui.messageParent to become available.
+      // If it never becomes available (legacy Outlook), the 60 attempts exhaust and
+      // we fall back to window.close() — the taskpane's localStorage poller has already
+      // picked up the token via Channel A, so the Promise resolves correctly anyway.
       function tryMessageParent(attempts) {
         if (attempts <= 0) {
+          // 30 seconds elapsed, messageParent never became available.
+          // The taskpane's localStorage poller has had 30 seconds to read the token —
+          // it will have picked it up well before we reach here.
+          // Close the dialog via window.close() to dismiss the popup from inside.
+          // The taskpane's DialogEventReceived fires with error 12006 (user/code closed),
+          // but since settle() was already called by the localStorage path, that's a no-op.
           dbg("messageParent exhausted — closing dialog via window.close()");
           showError("Sign-in complete — closing…");
-          // Give the taskpane's localStorage poller ~1.2 s to read the token,
-          // then close the dialog. DialogEventReceived (12006) fires in the
-          // taskpane but settle() is already resolved so it's a no-op.
+          // 1.2 s delay: gives the taskpane's poller one final polling interval (500 ms × 2
+          // plus margin) to read the localStorage result before we close the window.
           setTimeout(function() {
-            try { window.close(); } catch(e) { dbg("window.close() failed: " + e.message); }
+            try {
+              window.close(); // Closes this dialog window
+            } catch(e) {
+              // window.close() can throw in some restricted Office environments — non-fatal
+              dbg("window.close() failed: " + e.message);
+            }
           }, 1200);
-          return;
+          return; // Stop recursing — no more retry attempts
         }
+
+        // Check whether Office.context.ui.messageParent is available yet.
+        // We guard all three levels of the chain (Office, Office.context, Office.context.ui)
+        // because any of them might be null/undefined during Office.js reinitialisation
+        // after a redirect. Accessing a property of null/undefined throws a TypeError
+        // without these guards.
         if (Office && Office.context && Office.context.ui && typeof Office.context.ui.messageParent === "function") {
           try {
-            Office.context.ui.messageParent(payload);
+            Office.context.ui.messageParent(payload); // Send the JSON string to the taskpane
             dbg("messageParent OK", "log-ok");
+            // Note: we do NOT close the dialog here. The taskpane's DialogMessageReceived
+            // handler calls dialog.close() from its side after receiving the message.
           } catch (e) {
+            // messageParent threw an unexpected error — tell the user but don't retry.
+            // The localStorage channel has already handled the token delivery.
             showError("Could not relay sign-in result: " + e.message);
           }
         } else {
+          // Office.js not ready yet — wait 500 ms and try again
           dbg("Office.context.ui not ready — retrying (" + attempts + ")...");
           setTimeout(function() { tryMessageParent(attempts - 1); }, 500);
         }
       }
 
-      // 60 × 500 ms = 30 s window — gives Office.js time to reinitialise
-      // after the Microsoft → Duo → Microsoft → auth-dialog redirect chain.
+      // Start the retry loop with 60 attempts (60 × 500 ms = 30 second window).
+      // This gives Office.js plenty of time to reinitialise after the redirect chain.
       tryMessageParent(60);
     }
 
+    // msalInstance is declared at module scope so createMsalInstance() can assign it
+    // and run() can use it. null until createMsalInstance() succeeds.
     var msalInstance = null;
 
+    /**
+     * createMsalInstance() — initialises the MSAL PublicClientApplication object.
+     * Must be called before any other MSAL operations.
+     * Returns true on success, false on failure.
+     *
+     * PublicClientApplication is MSAL's main entry point — it manages token caching,
+     * redirect handling, and the popup/redirect auth flows.
+     */
     function createMsalInstance() {
       try {
         dbg("Creating MSAL instance...");
         msalInstance = new msal.PublicClientApplication({
           auth: {
-            clientId: CLIENT_ID,
-            authority: "https://login.microsoftonline.com/" + TENANT_ID,
-            redirectUri: REDIRECT_URI,
+            clientId:    CLIENT_ID,  // Which Azure app to authenticate against
+            authority:   "https://login.microsoftonline.com/" + TENANT_ID, // Single-tenant — only Sunshine Sachs users
+            redirectUri: REDIRECT_URI, // Where Microsoft redirects after auth
+            // navigateToLoginRequestUrl: true — after a redirect, MSAL navigates
+            // back to the URL that originally triggered the login. This ensures
+            // auth-dialog.html reloads (not some intermediate Microsoft page)
+            // so Office.js is available for messageParent after the redirect.
             navigateToLoginRequestUrl: true
           },
-          cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false }
+          cache: {
+            // sessionStorage: token cache lives only for this browser session.
+            // More secure than localStorage (cleared when the tab closes, isolated
+            // between tabs on the same origin). Good choice for an auth dialog.
+            cacheLocation: "sessionStorage",
+            // storeAuthStateInCookie: false — the auth state nonce lives in
+            // sessionStorage, not a cookie. Cookies can be blocked by some
+            // Office WebView configurations; sessionStorage is more reliable.
+            storeAuthStateInCookie: false
+          }
         });
         dbg("MSAL instance created OK", "log-ok");
         return true;
       } catch (e) {
         dbg("MSAL instance creation FAILED: " + e.message, "log-err");
         showError("Auth library init failed: " + e.message);
-        return false;
+        return false; // Signal failure to the caller
       }
     }
 
+    /**
+     * run() — the main async auth flow.
+     * Called once by startAuth() after Office.onReady fires.
+     *
+     * Flow:
+     *   1. Create MSAL instance
+     *   2. msalInstance.initialize() — required since MSAL v2.28+
+     *   3. handleRedirectPromise() — checks if we're returning from a redirect
+     *   4. acquireTokenSilent() — tries cached tokens first
+     *   5. acquireTokenPopup() — opens a popup for interactive sign-in (preferred)
+     *   6. acquireTokenRedirect() — full page redirect fallback if popup is blocked
+     */
     async function run() {
       dbg("run() started");
+
+      // Create the MSAL instance — bail out if it fails (already shows error UI)
       if (!createMsalInstance()) return;
 
       try {
         setStep(2, "Initialising secure session…");
         dbg("calling initialize()...");
+
+        // initialize() must be called before any other MSAL method in MSAL v2.28+.
+        // It sets up MSAL's internal state, loads the token cache from sessionStorage,
+        // and prepares the library for the current page's context.
         await msalInstance.initialize();
         dbg("initialize() done", "log-ok");
 
         setStep(3, "Checking for existing sign-in…");
         dbg("calling handleRedirectPromise()...");
 
-        // Race handleRedirectPromise against a 6-second timeout so it never hangs
+        // handleRedirectPromise() checks whether the current page load is the result
+        // of a redirect from Microsoft's login page. When acquireTokenRedirect() is
+        // called, it navigates this page away to Microsoft, and when Microsoft is done
+        // it redirects back to REDIRECT_URI (this page) with an auth code in the URL.
+        // handleRedirectPromise() detects the auth code, exchanges it for tokens, and
+        // returns an AuthenticationResult with the access token.
+        //
+        // We race it against a 6-second timeout because in some environments
+        // handleRedirectPromise() can hang indefinitely (e.g., sessionStorage is
+        // unavailable, or the state nonce was cleared). The timeout prevents the
+        // dialog from freezing — if it times out we fall through to the interactive flows.
         var redirectResponse = await Promise.race([
           msalInstance.handleRedirectPromise(),
           new Promise(function(resolve) {
             setTimeout(function() {
               dbg("handleRedirectPromise timeout — proceeding");
-              resolve(null);
+              resolve(null); // Resolve with null to indicate "no redirect response"
             }, 6000);
           })
         ]);
@@ -477,13 +833,18 @@
         dbg("handleRedirectPromise → " + (redirectResponse ? "GOT RESPONSE" : "null"), "log-ok");
 
         if (redirectResponse && redirectResponse.accessToken) {
+          // We got a token from the redirect! This is the success path after
+          // Microsoft → Duo → auth-dialog.html redirect chain completes.
           setStep(4, "Signed in — returning to Mail Merge…");
           dbg("Sending token to parent", "log-ok");
           sendToParent({ type: "token", token: redirectResponse.accessToken });
-          return;
+          return; // Done — exit run()
         }
 
-        // Try silent token for existing accounts
+        // ── Silent token acquisition ────────────────────────────────────────
+        // No redirect response — check if MSAL has accounts cached from a previous
+        // session. getAllAccounts() reads from sessionStorage; if the user signed in
+        // earlier in this session, their account is here.
         var accounts = msalInstance.getAllAccounts();
         dbg("accounts in cache: " + accounts.length);
 
@@ -491,18 +852,26 @@
           try {
             setStep(3, "Restoring your session…");
             dbg("trying silent token...");
+            // acquireTokenSilent() uses the cached refresh token to get a new access token
+            // without any user interaction. Fast and invisible to the user.
             var silent = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
             dbg("silent token OK", "log-ok");
             setStep(4, "Signed in — returning to Mail Merge…");
             sendToParent({ type: "token", token: silent.accessToken });
-            return;
+            return; // Done — exit run()
           } catch (se) {
+            // Silent failed — token may have expired and refresh failed, or the account
+            // needs re-consent. Fall through to interactive sign-in.
             dbg("silent failed: " + (se.errorCode || se.message));
           }
         }
 
-        // Popup first — keeps dialog page alive so Office.context.ui stays intact
-        // (redirect kills the page and legacy Mac Outlook loses messageParent on reload)
+        // ── Interactive sign-in: popup first ───────────────────────────────
+        // acquireTokenPopup() opens a new browser popup window pointing to Microsoft's
+        // login page. This keeps the auth-dialog.html page alive in the background —
+        // important because Office.context.ui (and messageParent) are bound to this
+        // page's lifetime. If this page navigates away (redirect), Office.js loses
+        // its context and messageParent becomes unavailable after return.
         setStep(4, "Opening Microsoft sign-in…");
         dbg("trying acquireTokenPopup...");
         try {
@@ -510,45 +879,84 @@
           dbg("popup token OK", "log-ok");
           setStep(5, "Signed in — returning to Mail Merge…");
           sendToParent({ type: "token", token: popupResponse.accessToken });
-          return;
+          return; // Done — exit run()
         } catch (popupErr) {
           var pCode = popupErr.errorCode || "";
           dbg("popup error: " + pCode);
-          // Only fall back to redirect if the popup was actually blocked/unavailable
+
+          // Only fall back to redirect if the popup was actually blocked by the browser
+          // or OS. MSAL returns "popup_window_error" or "empty_window_error" for this.
+          // Any other error (user_cancelled, account_required, etc.) should surface to
+          // the user rather than triggering a full-page redirect.
           if (pCode === "popup_window_error" || pCode === "empty_window_error") {
             dbg("Popup blocked — falling back to redirect...");
+            // acquireTokenRedirect() navigates this entire page to Microsoft's login.
+            // After login (+ Duo MFA), Microsoft redirects back to REDIRECT_URI.
+            // handleRedirectPromise() at the top of run() will then catch the response.
+            // Note: after this call, no more code on this page executes — it's a navigation.
             await msalInstance.acquireTokenRedirect({ scopes: SCOPES });
             dbg("acquireTokenRedirect called (page navigating away)");
+            // Execution stops here — the page is navigating away
           } else {
+            // Popup opened but auth failed for another reason — re-throw so the
+            // catch block below can handle it with a user-facing error message.
             throw popupErr;
           }
         }
 
       } catch (e) {
+        // ── Top-level error handler ───────────────────────────────────────
+        // Catches errors from initialize(), handleRedirectPromise(), silent acquire,
+        // or any re-thrown popup errors. We inspect the errorCode to decide how to
+        // handle the error and what message to show.
         var code = e.errorCode || "";
         var msg  = e.errorMessage || e.message || "Unknown error";
         dbg("CATCH: " + code + " — " + msg, "log-err");
 
         if (code === "interaction_in_progress") {
-          sessionStorage.clear();
+          // This MSAL error means a previous auth interaction (popup or redirect) is
+          // still in progress when we try to start another one. This usually happens
+          // if the user opens the dialog a second time while the first is still running,
+          // or if a previous redirect left MSAL's state in sessionStorage in a stuck state.
+          // Clearing sessionStorage resets MSAL's internal state — it will start fresh
+          // next time. We wait 3 seconds before sending the error back so the user can
+          // read the message before the dialog closes.
+          sessionStorage.clear(); // Reset MSAL's stuck interaction state
           var m = "Sign-in interrupted. Please close this window and try again.";
           showError(m);
           setTimeout(function() { sendToParent({ type: "error", message: m }); }, 3000);
           return;
         }
+
+        // For all other errors: show the error UI, then send the error back to the
+        // taskpane after 3 seconds so the user has time to read it.
         showError(msg);
         setTimeout(function() { sendToParent({ type: "error", message: msg }); }, 3000);
       }
     }
 
+    /**
+     * startAuth() — entry point called once both MSAL and Office.js are ready.
+     * Registers Office.onReady so run() fires after Office.js initialises.
+     * Also sets a 5-second fallback timeout in case Office.onReady never fires
+     * (e.g., Office.js failed to load or the runtime is not an Office host).
+     */
     function startAuth() {
       setStep(1, "Preparing Office runtime…");
       dbg("registering Office.onReady...");
+
+      // Office.onReady fires when the Office.js runtime has initialised and the
+      // add-in host (Outlook) is ready to receive API calls. We must wait for this
+      // before calling anything that uses Office.context.ui (like messageParent).
       Office.onReady(function() {
         dbg("Office.onReady fired", "log-ok");
-        run();
+        run(); // Start the MSAL auth flow
       });
-      // Fallback if onReady never fires within 5 s
+
+      // Safety net: if Office.onReady never fires within 5 seconds (rare — usually
+      // indicates Office.js failed to load or we're running outside an Office host),
+      // run() directly. We guard with `!msalInstance` to avoid double-running if
+      // Office.onReady already fired and run() has started creating the MSAL instance.
       setTimeout(function() {
         if (!msalInstance) {
           dbg("Office.onReady timeout — running directly");
@@ -557,6 +965,9 @@
       }, 5000);
     }
 
+    // If MSAL is already defined (loaded synchronously from jsDelivr), kick off auth now.
+    // If MSAL failed to load from jsDelivr, loadMsalFallback() will call startAuth()
+    // once the alcdn fallback script loads successfully.
     if (typeof msal !== "undefined") {
       startAuth();
     }

