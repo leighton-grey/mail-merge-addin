@@ -116,7 +116,7 @@
       <!-- CSV section -->
       <div id="csvSection" class="section">
         <label class="label">Recipient list <span class="hint-inline">(CSV or Excel)</span></label>
-        <p class="hint" style="margin-bottom:8px;">Upload a spreadsheet or paste data below. Each row becomes one email.</p>
+        <p class="hint" style="margin-bottom:8px;">Upload, drag &amp; drop, or paste — each row becomes one email.</p>
         <div class="csv-upload-row">
           <button class="btn-secondary" id="uploadCsvBtn" title="Load a .csv or .xlsx spreadsheet of recipients">📂 Load CSV / Excel</button>
           <a id="downloadSampleCsv" href="#" class="btn-secondary btn-sample-csv" title="Download a ready-to-fill sample CSV with all supported columns">⬇ Sample file</a>
@@ -351,13 +351,8 @@
             <div id="greetingCustomWrap" class="hidden" style="margin-bottom:6px;">
               <input type="text" id="greetingCustomTemplate" class="input"
                 placeholder="e.g. Dear {{title}} {{last_name}}," />
-              <p class="hint" style="margin-top:4px;">Use any <code>{{column_name}}</code> from your CSV — e.g. <code>{{title}}</code> for Mr./Mrs./Dr.</p>
             </div>
-            <p class="hint">
-              Preset formats use <code>salutation</code>, <code>first_name</code>, <code>last_name</code> columns.
-              Choose <em>Custom template…</em> to use any column (e.g. a <code>title</code> column for Mr./Mrs./Dr.).
-              The fallback is used when name fields are empty.
-            </p>
+            <p class="hint">Use any <code>{{column}}</code> from your CSV. Fallback applies when fields are empty.</p>
           </div>
         </details>
       </div>
@@ -613,15 +608,17 @@
       <span id="progressLabel" class="progress-label">0%</span>
     </div>
 
-    <!-- Step 1 — test send strip; encouraging users to verify before full merge -->
+    <!-- Step 1 — test send strip; encouraging users to verify before full merge.
+         Row selector sits on its own line below the label so email addresses
+         in the dropdown are fully readable without truncation.              -->
     <div class="footer-step1-row">
-      <span class="step1-label">Step 1 — Test</span>
-      <div style="display:flex;gap:5px;align-items:center;margin-left:auto;flex-shrink:0;">
-        <select id="testRowSelect" title="Row to use for test send" class="step1-row-select">
-          <option value="0">Row 1</option>
-        </select>
+      <div style="display:flex;align-items:center;justify-content:space-between;width:100%;margin-bottom:5px;">
+        <span class="step1-label">Step 1 — Test</span>
         <button id="checkErrorsBtn" class="btn-step1-check" title="Run pre-flight check on recipients and tokens">🔍 Check errors</button>
       </div>
+      <select id="testRowSelect" title="Row to use for test send" class="step1-row-select" style="width:100%;margin-bottom:5px;">
+        <option value="0">Row 1</option>
+      </select>
       <button id="testSendBtn" class="btn-step1">📨 Send test to myself</button>
     </div>
 

@@ -4015,10 +4015,16 @@ function renderPreviewTable(rows) {
   // The filter button shows an orange dot (●) when a filter is currently active
   // so users can see at a glance that the table is filtered.
   const filterActiveIndicator = activeFilter ? ' <span class="filter-active-dot" title="Filter active">●</span>' : '';
-  let html = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap;">' +
+  // Row 1: preview label + Edit table button (inline, same line as the title).
+  // Row 2: Filter button on its own line below, left-aligned under "Preview".
+  let html = '<div style="margin-bottom:4px;">' +
+    '<div style="display:flex;align-items:center;gap:6px;">' +
     '<label class="label" style="margin:0;">Preview (rows ' + (previewTablePage * PREVIEW_PAGE_SIZE + 1) + '–' + Math.min((previewTablePage + 1) * PREVIEW_PAGE_SIZE, rows.length) + ' of ' + rows.length + ')</label>' +
     '<button class="btn-secondary btn-edit-table" id="openEditTableBtn">✏ Edit table</button>' +
+    '</div>' +
+    '<div style="margin-top:4px;">' +
     '<button class="btn-filter-popup" id="openFilterBtn" title="Filter and sort recipients">⊞ Filter' + filterActiveIndicator + '</button>' +
+    '</div>' +
     '</div>';
   html += '<table class="preview-table"><thead><tr>';
   // "Select all" header checkbox — toggles all visible row checkboxes.
@@ -5196,8 +5202,10 @@ function effectiveBatchSize(attachmentSizeBytes) {
  * @returns {{ name: string, value: string }[]} pair of Graph internetMessageHeader objects
  */
 function buildUnsubHeaders(url) {
+  // Strip CR/LF to prevent header injection (CRLF injection / RFC 5322 folding attack)
+  const safeUrl = String(url).replace(/[\r\n]/g, "");
   return [
-    { name: "List-Unsubscribe",      value: `<${url}>` },
+    { name: "List-Unsubscribe",      value: `<${safeUrl}>` },
     { name: "List-Unsubscribe-Post", value: "List-Unsubscribe=One-Click" }
   ];
 }
@@ -5851,7 +5859,7 @@ async function showPreSendConfirmation(recipients, batchDelayMs, scheduledCount)
   const subjectTemplate = document.getElementById("subjectInput")?.value || "";
   let firstSubjectPreview = "";
   if (subjectTemplate && typeof personalize === "function") {
-    try { firstSubjectPreview = personalize(subjectTemplate, first); } catch(e) { firstSubjectPreview = subjectTemplate; }
+    try { firstSubjectPreview = personalize(subjectTemplate, first, false); } catch(e) { firstSubjectPreview = subjectTemplate; }
   }
 
   document.getElementById("preSendSummary").innerHTML =
@@ -6934,7 +6942,7 @@ async function handleImportContacts() {
     renderContactsList(contactsData);
   } catch (err) {
     document.getElementById("contactsList").innerHTML =
-      `<p style="padding:8px;color:#eb5757;">Failed to load contacts: ${err.message}</p>`;
+      `<p style="padding:8px;color:#eb5757;">Failed to load contacts: ${escapeHtml(err.message)}</p>`;
   }
 }
 
