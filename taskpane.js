@@ -3242,7 +3242,7 @@ function getAccessToken() {
           const code = result.error.code;
           // SSO errors that indicate config/federation issues — fall back to MSAL dialog
           // (common with JumpCloud IdP, misconfigured Entra, or tenant SSO restrictions)
-          const fallbackCodes = [13001, 13002, 13003, 13004, 13005, 13006, 13007, 13008, 13009, 13010, 13012, 13013];
+          const fallbackCodes = [13000, 13001, 13002, 13003, 13004, 13005, 13006, 13007, 13008, 13009, 13010, 13012, 13013];
           if (fallbackCodes.includes(code)) {
             log("SSO unavailable (code " + code + ") — opening sign-in dialog…", "warning");
             getTokenViaDialog().then(resolve).catch(reject);
