@@ -3259,19 +3259,23 @@ function getAccessToken() {
 
 function getTokenViaDialog() {
   return new Promise((resolve, reject) => {
-    const dialogUrl = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1) + 'auth-dialog.html?v=6';
+    const dialogUrl = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1) + 'auth-dialog.html?v=7';
 
     // Clear any stale localStorage result before opening the dialog
     try { localStorage.removeItem('mm_auth_result'); } catch(e) {}
 
     let settled = false;
     let lsPoller = null;
+    let _dialog = null; // stored so settle() can close it via the localStorage path
 
     function settle(fn, value) {
       if (settled) return;
       settled = true;
       if (lsPoller) { clearInterval(lsPoller); lsPoller = null; }
       try { localStorage.removeItem('mm_auth_result'); } catch(e) {}
+      // Close the dialog from the taskpane side — needed when the localStorage
+      // fallback path resolves the token (messageParent unavailable in legacy Mac Outlook).
+      if (_dialog) { try { _dialog.close(); } catch(e) {} _dialog = null; }
       fn(value);
     }
 
@@ -3300,7 +3304,10 @@ function getTokenViaDialog() {
           return;
         }
         const dialog = asyncResult.value;
+        _dialog = dialog; // expose to settle() so localStorage path can close it
+
         dialog.addEventHandler(Office.EventType.DialogMessageReceived, (arg) => {
+          _dialog = null; // dialog closes itself after messageParent
           dialog.close();
           try {
             const msg = JSON.parse(arg.message);
@@ -3314,7 +3321,9 @@ function getTokenViaDialog() {
           }
         });
         dialog.addEventHandler(Office.EventType.DialogEventReceived, (arg) => {
-          // 12006 = user closed the dialog manually
+          _dialog = null; // dialog already gone (user dismissed or window.close())
+          // 12006 = closed manually or via window.close() — only reject if not
+          // already settled by the localStorage path.
           settle(reject, new Error(arg.error === 12006 ? "Sign-in cancelled" : "Dialog closed unexpectedly (error " + arg.error + ")"));
         });
       }

@@ -399,8 +399,14 @@
 
       function tryMessageParent(attempts) {
         if (attempts <= 0) {
-          dbg("messageParent exhausted — localStorage fallback active, dialog will stay open");
-          showError("Sign-in complete — waiting for Outlook to close this window…");
+          dbg("messageParent exhausted — closing dialog via window.close()");
+          showError("Sign-in complete — closing…");
+          // Give the taskpane's localStorage poller ~1.2 s to read the token,
+          // then close the dialog. DialogEventReceived (12006) fires in the
+          // taskpane but settle() is already resolved so it's a no-op.
+          setTimeout(function() {
+            try { window.close(); } catch(e) { dbg("window.close() failed: " + e.message); }
+          }, 1200);
           return;
         }
         if (Office && Office.context && Office.context.ui && typeof Office.context.ui.messageParent === "function") {
