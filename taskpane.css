@@ -204,7 +204,7 @@ body {
   color: var(--text-muted);
   cursor: pointer;
   transition: color var(--transition), border-color var(--transition), background var(--transition);
-  border-radius: 10px 10px 0 0;  /* only round top corners so bottom edge is flush with bar border */
+  border-radius: 10px 10px 0 0;  /* only round top corners, bottom edge flush with bar border */
 }
 
 .tab-btn:hover {
@@ -330,7 +330,7 @@ body {
 .input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(91,82,200,0.13);  /* 13% opacity purple halo */
+  box-shadow: 0 0 0 3px rgba(91,82,200,0.13);  /* 3px ring (13% purple) = Office-friendly focus size */
   background: var(--surface);  /* pure white when focused for contrast */
 }
 
@@ -573,15 +573,15 @@ body {
   font-size: 11.5px;
   font-weight: 600;
   padding: 5px 13px;
-  border-radius: 99px;              /* pill shape */
+  border-radius: 99px;  /* pill shape */
   border: 1.5px solid var(--accent-border);
   cursor: pointer;
-  font-family: monospace;           /* code-style text for {{column_name}} tags */
+  font-family: monospace;  /* monospace makes {{variable}} syntax feel code-like */
   box-shadow: 0 1px 4px rgba(83,74,183,0.10);
   transition: background var(--transition), border-color var(--transition),
               box-shadow var(--transition), transform var(--transition), color var(--transition);
   -webkit-tap-highlight-color: transparent;  /* remove mobile tap flash */
-  user-select: none;                          /* prevent text selection on click */
+  user-select: none;  /* prevent accidental text selection on click */
 }
 
 .tag:hover {
@@ -622,7 +622,7 @@ body {
   border-color: #A8D5B5;
 }
 
-.tag-smart:hover { background: #D0EBDA; }  /* slightly deeper green tint on hover */
+.tag-smart:hover { background: #D0EBDA; }  /* deeper green tint on hover */
 
 /* ─── Count Badge ─────────────────────────────────────────────────
    Small pill showing a numeric count (e.g. "12 recipients").
@@ -674,15 +674,12 @@ body {
 /* Allow the preview-table section to scroll horizontally on its own
    so a wide CSV doesn't push the whole pane sideways.
    overflow-x: scroll (not auto) forces the scrollbar to always be visible —
-   this gives OWA users a grab-handle to scroll left/right manually since
-   OWA's webview can swallow horizontal trackpad gestures.
-   overscroll-behavior-x: contain stops macOS from treating a leftward
-   horizontal swipe as browser Back navigation instead of a table scroll.
-   The always-visible scrollbar has no negative effect on legacy/desktop
-   Outlook — it simply appears at the bottom of the table at all times. */
+   this gives OWA users a grab-handle since OWA can swallow trackpad gestures.
+   overscroll-behavior-x: contain stops macOS swipe-back on horizontal scroll.
+   Always-visible scrollbar has no negative effect on desktop Outlook. */
 #previewTable {
-  overflow-x: scroll;
-  overscroll-behavior-x: contain;
+  overflow-x: scroll;  /* force visible scrollbar for OWA usability */
+  overscroll-behavior-x: contain;  /* stop macOS swipe-to-back on horizontal scroll */
 }
 
 /* Style the always-visible scrollbar to match the UI — thin, subtle track
@@ -779,7 +776,7 @@ body {
   border-radius: 99px;
   width: 0%;            /* JS updates this percentage as sends complete */
   transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1);  /* smooth fill animation */
-  box-shadow: 0 0 10px rgba(91,82,200,0.42);              /* purple inner glow */
+  box-shadow: 0 0 10px rgba(91,82,200,0.42);  /* purple inner glow adds depth/focus */
 }
 
 .progress-label {
@@ -887,7 +884,7 @@ body {
 }
 
 .merge-actions-secondary button {
-  flex: 1 1 calc(50% - 3px);   /* two buttons per row, accounting for the gap */
+  flex: 1 1 calc(50% - 3px);   /* 2 buttons/row in ~320px pane: half width minus half the 5px gap */
   min-width: 0;                 /* allow shrinking below natural content width */
   white-space: nowrap;          /* keep each label on one line inside the button */
   overflow: hidden;             /* clip if somehow still too long */
@@ -964,7 +961,7 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   margin-top: 8px;
-  overflow: hidden;    /* clip body when collapsed — prevents layout bleed */
+  overflow: hidden;  /* clip collapsed body inside the rounded border */
   box-shadow: var(--shadow-sm);
 }
 
@@ -1080,13 +1077,13 @@ body {
    ─────────────────────────────────────────────────────────────── */
 .modal-overlay {
   position: fixed;
-  inset: 0;                             /* covers top/right/bottom/left = 0 */
+  inset: 0;  /* shorthand: top/right/bottom/left = 0 (covers entire viewport) */
   background: rgba(10, 8, 30, 0.52);   /* dark navy with 52% opacity */
   backdrop-filter: blur(4px);           /* blur underlying content for focus */
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  z-index: 100;  /* float above tab-bar (20) and modal content (1) */
 }
 
 .modal {
@@ -1196,9 +1193,9 @@ body {
   padding: 6px 8px;
   border-bottom: 2px solid var(--border);
   white-space: nowrap;
-  position: sticky;
+  position: sticky;  /* header stays pinned to top of .edit-table-grid viewport */
   top: 0;
-  z-index: 1;
+  z-index: 1;  /* stays above scrolling row bodies */
 }
 
 .edit-table-grid td {
@@ -1250,11 +1247,11 @@ body {
   border: none;
   padding: 0 2px;
   line-height: 1;
-  opacity: 0;
+  opacity: 0;  /* hidden at rest; shown only on .edit-table-grid th:hover */
   transition: opacity 0.15s;
   flex-shrink: 0;
 }
-.edit-table-grid th:hover .edit-col-del { opacity: 1; }
+.edit-table-grid th:hover .edit-col-del { opacity: 1; }  /* reveal delete button on hover */
 .edit-col-del:hover { color: #e53e3e; }
 
 .edit-cell-input {
@@ -1351,9 +1348,9 @@ body {
   background: var(--surface);
   border-top: 1px solid var(--border);
   padding: 9px 10px 11px;
-  z-index: 20;
+  z-index: 20;  /* stacks above scrolled content, below modals (z-index: 100) */
   flex-shrink: 0;       /* never compress the footer height */
-  overflow: visible;    /* allow footer-disclosure to expand upward outside the box */
+  overflow: visible;    /* allow footer-disclosure <details> to expand upward */
   box-shadow: 0 -3px 12px rgba(83,74,183,0.08);  /* upward purple shadow */
 }
 
@@ -1393,15 +1390,15 @@ body {
    ─────────────────────────────────────────────────────────────── */
 .toast-container {
   position: fixed;
-  top: 46px;           /* just below the header bar */
+  top: 46px;  /* just below the 46px header bar */
   left: 0;
   right: 0;
-  z-index: 9999;
+  z-index: 9999;  /* highest z-index to float above all other UI layers */
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 0 8px;
-  pointer-events: none;
+  pointer-events: none;  /* allow clicks through to elements below */
 }
 
 .toast {
@@ -1528,17 +1525,16 @@ code {
 /* ─── Tag insert-target toggle (Body / Subject) ───────────────
    A small segmented control sitting in the tags-header row.
    The user picks whether clicking a chip goes to the email body
-   (setSelectedDataAsync) or the Outlook native subject
-   (subject.getAsync + setAsync). The active button gets a filled
-   pill; inactive buttons are ghost-outlined.
+   or the Outlook native subject line. Active button gets filled;
+   inactive buttons are ghost-outlined.
    ─────────────────────────────────────────────────────────── */
 .tag-target-toggle {
   display: inline-flex;
   border: 1px solid var(--border);
-  border-radius: 99px;        /* pill container */
+  border-radius: 99px;  /* pill container */
   overflow: hidden;
   gap: 0;
-  margin-left: auto;          /* push to the right inside .tags-header flex row */
+  margin-left: auto;  /* flex: auto pushes toggle to the right in .tags-header */
 }
 
 .tag-target-btn {
@@ -1585,19 +1581,19 @@ code {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-left: 5px;            /* breathing room between label text and × */
+  margin-left: 5px;  /* breathing room between label text and × */
   padding: 0 2px;
-  background: none;            /* transparent — matches chip background */
+  background: none;  /* transparent — matches chip background */
   border: none;
-  color: inherit;              /* inherit chip text colour */
-  opacity: 0.55;               /* subtle at rest so label is the focus */
+  color: inherit;  /* inherit chip text colour */
+  opacity: 0.55;  /* subtle at rest, so label stays the primary focus */
   cursor: pointer;
-  font-size: 10px;             /* small × that doesn't overpower the label */
+  font-size: 10px;  /* small × that doesn't overpower the label */
   font-family: inherit;
   line-height: 1;
-  border-radius: 99px;         /* fully rounded so hover state is a soft circle */
+  border-radius: 99px;  /* fully rounded so hover state is a soft circle */
   transition: opacity var(--transition), background var(--transition), color var(--transition);
-  vertical-align: middle;      /* align × glyph with the label baseline */
+  vertical-align: middle;  /* align × glyph with the label baseline */
 }
 
 .tag-remove-btn:hover {
@@ -1625,7 +1621,7 @@ code {
   transition: color var(--transition);
 }
 
-.hint-advanced-toggle::-webkit-details-marker { display: none; }
+.hint-advanced-toggle::-webkit-details-marker { display: none; }  /* hide default marker; use ::before instead */
 
 .hint-advanced-toggle::before {
   content: '›';
@@ -1645,14 +1641,14 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
   border: 1px solid var(--border-light);
   border-radius: var(--radius-sm);
   font-size: 11.5px;
-  color: var(--text-secondary);  /* slightly stronger than muted for code-heavy content */
+  color: var(--text-secondary);  /* slightly bolder than muted for code-heavy docs */
   line-height: 1.9;
 }
 
 /* ─── About Section ──────────────────────────────────────────── */
 .about-section {
-  background: linear-gradient(140deg, #FFFBF7 0%, #FFF5EC 100%);
-  border-color: rgba(245,130,32,0.22);
+  background: linear-gradient(140deg, #FFFBF7 0%, #FFF5EC 100%);  /* warm cream-orange tint */
+  border-color: rgba(245,130,32,0.22);  /* orange tint shows brand affiliation */
 }
 
 .about-header {
@@ -1743,10 +1739,10 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
 
 /* ─── Utility ─────────────────────────────────────────────────────
    .hidden is toggled on/off by JS to show and hide elements.
-   !important ensures it overrides any other display value even
-   when specificity would otherwise favour a component rule.
+   !important ensures it overrides any other display value, even
+   when a component rule has higher specificity.
    ─────────────────────────────────────────────────────────────── */
-.hidden { display: none !important; }
+.hidden { display: none !important; }  /* force hide regardless of component styles */
 
 /* ─── Bare inputs in accordion panels (Advanced, Scheduling) ─────
    These number/time/email inputs don't carry the .input class but
@@ -1821,12 +1817,11 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
 }
 
 /* Overlay shown during an active drag — hidden by default (display: none).
-   pointer-events: none ensures the overlay doesn't block the drop event
-   that fires on the underlying textarea.                           */
+   pointer-events: none lets drag events pass through to the textarea below.  */
 .csv-drop-hint {
   display: none;
   position: absolute;
-  inset: 0;                              /* covers entire .csv-drop-zone */
+  inset: 0;  /* covers entire .csv-drop-zone */
   background: rgba(91, 82, 200, 0.08);  /* light purple tint */
   border: 2px dashed var(--accent);     /* dashed border = "drop target" */
   border-radius: var(--radius);
@@ -1835,8 +1830,8 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
   font-size: 13px;
   font-weight: 600;
   color: var(--accent);
-  pointer-events: none;  /* let drag events pass through to the textarea below */
-  z-index: 2;
+  pointer-events: none;  /* pass drag events through to .csv-area (z-index: 1) */
+  z-index: 2;  /* sits above .csv-area to display the drop prompt */
 }
 
 .csv-drop-zone.drag-over .csv-drop-hint {
@@ -1911,7 +1906,7 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
 
 /* Orange "Send test" button — wraps to its own full-width line */
 .btn-step1 {
-  flex: 1 1 100%;   /* force onto a new line so top row stays compact */
+  flex: 1 1 100%;  /* forces this button onto a new line, lets top row stay compact */
   background: linear-gradient(180deg, var(--brand-orange) 0%, var(--brand-orange-dark) 100%);
   color: #fff;
   border: none;

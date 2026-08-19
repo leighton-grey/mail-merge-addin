@@ -183,13 +183,46 @@ const MAX_PAYLOAD_BYTES   = 3.5 * 1024 * 1024;
 // that here, so anything above this limit is rejected with a warning.
 const MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024;
 
+// ── localStorage keys ─────────────────────────────────────────────────────
+// Centralising key strings as constants prevents typos from silently creating
+// orphaned localStorage entries that are never read back. If you ever need to
+// rename a key (e.g. after a breaking schema change), change it in one place
+// here rather than hunting through the codebase for every "mailmerge_xxx" string.
+
+// Persists the subject-line template across page refreshes. Stored as a plain
+// string — the same text that populates #subjectInput on load.
 const LS_KEY_SUBJECT      = "mailmerge_subject";
+
+// Persists the raw CSV text across refreshes. Allows the user to close the
+// add-in task pane and reopen it without losing their recipient list.
 const LS_KEY_CSV          = "mailmerge_csv";
+
+// Persists user-defined custom tags (beyond the built-in DEFAULT_TAGS list).
+// Stored as a JSON-serialised array of strings like ["{{promo_code}}", ...].
 const LS_KEY_TAGS         = "mailmerge_custom_tags";
+
+// Persists saved named templates — subject, body, and all settings.
+// Stored as a JSON array of template objects; see saveTemplate() for the schema.
 const LS_KEY_TEMPLATES    = "mailmerge_templates";
+
+// Persists the greeting-line configuration (format + fallback).
+// Stored as a JSON object matching greetingConfig's shape.
 const LS_KEY_GREETING     = "mailmerge_greeting";
+
+// Persists a map of { email → ISO timestamp } for the last successful send to
+// each address. Used by the scheduling / sending-window logic to enforce
+// per-recipient cooldown periods and the daily-cap check.
 const LS_KEY_SEND_HISTORY = "mailmerge_send_history"; // { email: isoTimestamp }
 
+// ── Canonical field definitions ───────────────────────────────────────────
+// CANONICAL_FIELDS is the authoritative list of column names the add-in
+// understands natively. When the user uploads a CSV, the Match Fields dialog
+// maps arbitrary CSV column headers onto these canonical keys.
+//
+// The `required` flag drives validation: if no column is mapped to "email",
+// parseCSV/validateRecipients will refuse to proceed. All other fields are
+// optional — missing values are treated as empty strings, which is fine for
+// personalisation tokens (they render as blank rather than "{{first_name}}").
 const CANONICAL_FIELDS = [
   { key: "email",        label: "Email *",        required: true  },
   { key: "first_name",   label: "First name",      required: false },
@@ -207,19 +240,68 @@ const CANONICAL_FIELDS = [
   { key: "send_at",      label: "Send at",         required: false },
 ];
 
+// ── Default tag chips ─────────────────────────────────────────────────────
+// These are the built-in tokens shown as clickable chips in the tag toolbar.
+// They map to either: (a) a canonical CSV column (first_name, email, etc.),
+// or (b) a computed smart token resolved at send time (today, now, record_num).
+// Users can add additional chips via addCustomTag(); those are persisted under
+// LS_KEY_TAGS. DEFAULT_TAGS themselves are hard-coded and never stored —
+// they're always rendered fresh from this array.
 const DEFAULT_TAGS = [
   "{{first_name}}", "{{last_name}}", "{{email}}", "{{company}}", "{{title}}",
   "{{greeting_line}}", "{{today}}", "{{now}}", "{{record_num}}", "{{record_count}}",
   "{{merge_table}}", "{{unsubscribe_link}}"
 ];
 
+// ── Module-level state variables ──────────────────────────────────────────
+// These are the "global" state variables for the add-in. Keeping them at module
+// scope (rather than inside functions) lets every function share them without
+// threading values through call chains. The trade-off is that you must be careful
+// about resetting them between runs — stale state from a previous merge is a
+// common source of bugs (several fixes in the changelog address exactly this).
+
+// mergeInProgress: the double-send guard. Before starting any merge operation,
+// check this flag; set it to true at the start and false in the finally block.
+// Without this, a user clicking "Send" twice quickly (or the scheduler firing
+// while a manual merge runs) would launch two concurrent Graph API sessions,
+// causing duplicate emails and confusing log output.
 let mergeInProgress           = false;  // BUG 1: double-send guard
+
+// broadcastInProgress: same concept for the broadcast (one-to-many BCC) path,
+// which has its own entry point (handleBroadcast) and therefore its own flag.
+// Broadcast and normal merge can't safely run simultaneously — both write to
+// sendOutcomes, failedRecipients, and the progress bar.
 let broadcastInProgress       = false;  // UX Bug 6: re-entrancy guard for handleBroadcast
+
+// _mergeCompletedSuccessfully: set to true in the merge finally block when
+// everything sent without cancellation. The progress-hide animation checks this
+// flag — if the merge succeeded, we leave the progress bar at 100% for a moment
+// rather than hiding it immediately, giving the user visual confirmation.
 let _mergeCompletedSuccessfully = false; // Feature 5: suppress progress hide on success
+
+// previewTablePage / PREVIEW_PAGE_SIZE: the recipient preview table is paginated
+// to avoid rendering thousands of DOM rows, which freezes the browser. Page 0
+// is the first page. PREVIEW_PAGE_SIZE controls rows per page.
 let previewTablePage          = 0;      // Feature 6: preview table paging
 const PREVIEW_PAGE_SIZE       = 10;     // Feature 6: rows per page
+
+// parsedRecipients: the working recipient list produced by parseCSV() or the
+// quick-entry parser. Each element is a plain object whose keys are the CSV
+// column names (mapped to canonical names by fieldMapping). This array drives
+// everything — preview, validation, the merge loop, retry, and the summary report.
+// Cleared on each CSV reload to prevent the v1.4.0 "stale list" bug.
 let parsedRecipients          = [];
+
+// cancelRequested: set to true by handleStop(). The merge loop checks this flag
+// at the start of each batch iteration and exits cleanly if it's set.
+// Using a flag (rather than throwing an exception) gives the loop a chance to
+// finish the current in-flight batch before stopping, avoiding partial sends.
 let cancelRequested           = false;
+
+// subjectHasFocus: true while the #subjectInput text field has keyboard focus.
+// Used by insertTag() to decide whether to insert the token into the subject
+// field or the Outlook compose body. Must be tracked here because focus state
+// is lost by the time a chip's click handler fires (blur fires before click).
 let subjectHasFocus           = false;  // true while #subjectInput has keyboard focus
 
 // _subjectWasFocused: snapshot of subjectHasFocus captured on mousedown of a tag chip.
@@ -240,36 +322,136 @@ let _hintResetTimer           = null;
 // Toggled by the Body / Subject segmented control in the tag header.
 // Note: when #subjectInput itself is focused, insertTag() always writes
 // into that field regardless of tagTarget (subjectHasFocus takes priority).
+// tagTarget: controls where clicking a tag chip inserts the token.
+//   "body"    → Office.js setSelectedDataAsync (cursor position in Outlook compose body)
+//   "subject" → Office.js subject.getAsync + setAsync (appends to Outlook native subject)
+// Toggled by the Body / Subject segmented control in the tag header.
+// Note: when #subjectInput itself is focused, insertTag() always writes
+// into that field regardless of tagTarget (subjectHasFocus takes priority).
 let tagTarget                 = "body";
+
+// _lastOutlookSubject: caches the most recent subject string read from or pushed
+// to Outlook's native compose subject field via subject.getAsync/setAsync.
+// Lets the poll/push debounce skip redundant API calls when nothing has changed.
 let _lastOutlookSubject       = null;   // last value read from / pushed to Outlook's native subject
+
+// _subjectPushTimer: debounce timer ID for the push direction (local → Outlook).
+// We don't call subject.setAsync on every keystroke — that would spam the
+// Office.js API and cause flickering. Instead we wait 400 ms after the last
+// keystroke before pushing. clearTimeout/setTimeout pattern resets the timer
+// on each new keystroke.
 let _subjectPushTimer         = null;   // debounce timer for pushing to Outlook
+
+// _subjectPollTimer: handle for the setInterval that polls Outlook's native
+// subject field. Because Outlook can modify the subject independently (e.g. when
+// the user types directly in the subject box), we poll every 2 s and sync
+// back to #subjectInput if the value changed externally.
 let _subjectPollTimer         = null;   // interval for polling Outlook subject
+
+// sharedAttachments: files the user has attached via the "Add shared attachment"
+// picker. These are sent identically to EVERY recipient. Each entry is:
+//   { name: string, contentType: string, contentBytes: base64, sizeBytes: number }
+// Kept in memory only — large files here inflate every email's payload.
 let sharedAttachments         = [];   // array of { name, contentType, contentBytes, sizeBytes }
+
+// perRecipientFiles: Map from filename (lowercased) → attachment object for
+// per-recipient attachments. The CSV "attachment" column contains filenames;
+// this Map is populated when the user drops a folder of files. At send time,
+// resolveAttachmentForRecipient() looks up the recipient's filename here.
 let perRecipientFiles         = new Map();
+
+// inlineImages: Map from filename (lowercased) → attachment object for CID-embedded
+// inline images. When the body HTML contains <img src="cid:filename.png">, we look
+// the file up here and attach it with isInline:true and the matching contentId.
 let inlineImages              = new Map(); // filename.toLowerCase() → { name, contentType, contentBytes, sizeBytes }
+
+// suppressionSet: Set of email addresses that have opted out / unsubscribed.
+// Loaded from localStorage on startup. Recipients whose normalised address
+// appears here are silently skipped during the merge loop (never sent to Graph).
+// Managed via the Suppression UI — users can add/remove/export addresses.
 let suppressionSet            = new Set();
+
+// failedRecipients: array of recipient objects that failed to send during the
+// most recent merge run. Populated inside the batch loop on Graph errors.
+// Drives the "Retry failed" button — handleRetryFailed() reads this array
+// and re-sends only these rows.
 let failedRecipients          = [];
+
+// sendOutcomes: accumulates { email, status, timestamp, error? } for every send
+// attempt in the current merge run, including retries. Used to generate the
+// downloadable CSV summary report at the end of a merge. Note: this array
+// accumulates across retries within a single run (not across separate runs).
 let sendOutcomes              = [];   // { email, status, timestamp, error? } — for summary report
+
+// previewBodyTemplate: caches the raw HTML body string at the moment preview-all
+// is launched. We snapshot it here so that edits made in Outlook's compose window
+// during a long preview session don't affect the previews already generated.
 let previewBodyTemplate       = "";   // cached body for preview-all mode
+
+// warnedMissingAttachments: tracks which per-recipient attachment filenames have
+// already generated a "file not found" warning in the current run. Without this,
+// a 500-row merge where 10 rows reference a missing file would emit 10 identical
+// warning lines in the log — confusing and hard to scan.
 const warnedMissingAttachments = new Set(); // deduplicate per-filename warnings across a merge run
+
+// previewIndex / previewRecipients: state for the preview-all modal navigator.
+// previewIndex is the zero-based position in previewRecipients (the filtered
+// working set, not all of parsedRecipients). Kept here so the prev/next buttons
+// can update the modal without re-reading parsedRecipients.
 let previewIndex        = 0;    // current row index in preview navigator
 let previewRecipients   = [];   // filtered recipient set used by preview-all modal (A10)
 
+// fieldMapping: maps canonical field names to the actual CSV column headers the
+// user has in their file. E.g. { email: "Email Address", first_name: "Given Name" }.
+// Populated by the Match Fields dialog. When empty (no mapping set), parseCSV()
+// assumes the CSV headers exactly match the canonical keys.
 let fieldMapping = {}; // { canonicalName: csvColumnName }
+
+// greetingConfig: drives the {{greeting_line}} smart token. `format` is one of
+// the predefined greeting patterns (e.g. "dear_sal_last" → "Dear Mr Smith"),
+// and `fallback` is used when the required name fields are missing.
+// Persisted to localStorage under LS_KEY_GREETING.
 let greetingConfig = { format: "dear_sal_last", fallback: "Dear Valued Customer" };
+
+// draftsMode: when true, buildEmailRequest() changes the Graph endpoint from
+// /sendMail to /messages (creates a draft) instead of sending immediately.
+// Useful for large sends that need manual review before delivery.
 let draftsMode = false;
 
+// selectedRowIndices: controls which rows participate in the merge.
+// null means "all rows" (the common case). A Set of parsedRecipients array
+// indices means "only these rows" — set when the user checks specific rows in
+// the recipient table, or when using preview-filtered send.
 let selectedRowIndices = null; // null = all selected; Set of original parsedRecipients indices when subset
+
+// editTableHeaders / editTableRows: working copies used while the inline
+// recipient-table editor is open. We edit copies rather than parsedRecipients
+// directly so the user can cancel without corrupting the working list.
 let editTableHeaders = [];   // working copy of column names during an edit session
 let editTableRows    = [];   // working copy: array of string arrays (one per recipient)
 
-// Contacts Groups tab state
+// ── Contacts/Groups/Directory tab state ───────────────────────────────────
+// These three variables hold the data and selection state for the import-from-
+// contacts panel. Kept at module scope because the tab can be refreshed without
+// losing the user's checkbox selections.
+
+// groupsData: array of contact group objects returned by the Graph contacts API.
 let groupsData = [];
+
+// selectedGroups: Set of group IDs (Graph object IDs) the user has ticked.
+// Used by importSelectedGroups() to decide which groups to expand into recipients.
 let selectedGroups = new Set(); // group IDs
+
+// contactsActiveTab: which sub-tab is currently visible in the contacts panel.
+// "contacts" | "groups" | "directory" — drives CSS visibility and button state.
 let contactsActiveTab = "contacts"; // "contacts" | "groups" | "directory"
 
-// Directory tab state
+// ── Directory tab state ────────────────────────────────────────────────────
+// directoryData: results of the most recent Graph People / GAL search.
 let directoryData = [];
+
+// selectedDirectory: Set of email addresses the user has ticked in the directory
+// results list. Used by importSelectedDirectory() to append rows to the CSV.
 let selectedDirectory = new Set();
 
 // ── License check ─────────────────────────────────────────────────────────
@@ -473,14 +655,31 @@ function showLicenseGate(reason) {
 }
 // ──────────────────────────────────────────────────────────────────────────
 
+// ── Office.onReady ────────────────────────────────────────────────────────
+// Office.onReady is the entry point for every Office Add-in. It fires once the
+// Office.js library has finished loading and established a connection to the host
+// application (Outlook). All DOM manipulation and event-listener registration
+// must happen inside this callback — manipulating the DOM before this fires can
+// produce "API not initialised" errors in some Outlook versions.
+//
+// The `info` object tells us which host and platform we're on. We guard on
+// info.host === Office.HostType.Outlook so the script doesn't run if it's
+// accidentally loaded in Excel or Word.
 Office.onReady((info) => {
   if (info.host === Office.HostType.Outlook) {
     log("Office.js ready. Host: Outlook.", "info");
 
-    // License check (runs silently; enforcement controlled by LICENSE_ENFORCEMENT flag)
+    // License check — fire-and-forget. The .catch() here ensures a network
+    // failure during license validation never crashes the Office.onReady handler
+    // and never blocks the rest of the add-in from initialising.
+    // (runs silently; enforcement controlled by LICENSE_ENFORCEMENT flag)
     checkLicense().catch(err => log("License check failed (non-fatal): " + err.message, "warn"));
 
-    // C1 / C2: Check for Exchange Online mailbox — restUrl is null for IMAP/Gmail-only accounts
+    // C1 / C2: Check for Exchange Online mailbox — restUrl is null for IMAP/Gmail-only accounts.
+    // Office.context.mailbox.restUrl is only populated when the account is hosted in
+    // Exchange Online. If it's null, this is an IMAP/Google account and Graph API calls
+    // will all fail with 401 — show a clear banner rather than letting the user click
+    // "Send" and get a cryptic error message.
     const restUrl = Office.context.mailbox.restUrl;
     if (!restUrl) {
       const banner = document.createElement("div");
@@ -500,70 +699,109 @@ Office.onReady((info) => {
         with that M365 account (not the Google account).</em><br><br>
         <a href="https://learn.microsoft.com/en-us/microsoft-365/admin/misc/why-cant-i-do-mail-merge"
            style="color:#fff;text-decoration:underline;" target="_blank" rel="noopener noreferrer">Learn more about Exchange Online requirements</a>`;
+      // Insert at the very top of the page so it's the first thing the user sees.
       document.body.insertBefore(banner, document.body.firstChild);
+      // Disable all send/draft buttons — they would just fail with 401 anyway.
       ["mergeBtn","testSendBtn","previewAllBtn","saveDraftsBtn","broadcastBtn"].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = true;
       });
     }
 
+    // ── Core action buttons ────────────────────────────────────────────────
     document.getElementById("mergeBtn").addEventListener("click", handleMergeClick);
     document.getElementById("stopBtn").addEventListener("click", handleStop);
+    // previewBtn may not exist in all versions of the HTML, so guard with if.
     const previewBtn = document.getElementById("previewBtn");
     if (previewBtn) previewBtn.addEventListener("click", parseAndPreview);
 
-    // Optional columns dropdown toggle
+    // ── Optional columns disclosure triangle ──────────────────────────────
+    // The optional-columns list (CC, BCC, reply_to, etc.) is hidden by default
+    // to keep the CSV help section concise. The toggle button reveals it.
+    // We handle both click and keyboard (Enter/Space) for accessibility.
     const csvOptionalToggle = document.getElementById("csvOptionalToggle");
     const csvOptionalList   = document.getElementById("csvOptionalList");
     if (csvOptionalToggle && csvOptionalList) {
       function toggleCsvOptional() {
+        // Read the CURRENT state from the DOM, not a variable — the DOM is
+        // the source of truth for toggle state so it stays in sync even if
+        // something else changes the class externally.
         const open = !csvOptionalList.classList.contains("hidden");
         csvOptionalList.classList.toggle("hidden", open);
         csvOptionalToggle.textContent = open ? "Optional columns ▾" : "Optional columns ▴";
+        // ARIA: aria-expanded must track the open state for screen readers.
         csvOptionalToggle.setAttribute("aria-expanded", String(!open));
       }
       csvOptionalToggle.addEventListener("click", toggleCsvOptional);
       csvOptionalToggle.addEventListener("keydown", e => {
+        // Space and Enter are the ARIA-compliant activation keys for a button.
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleCsvOptional(); }
       });
     }
+
+    // ── Log controls ──────────────────────────────────────────────────────
     document.getElementById("clearLogBtn").addEventListener("click", clearLog);
+
+    // ── Tag chips ─────────────────────────────────────────────────────────
     document.getElementById("addCustomTagBtn").addEventListener("click", addCustomTag);
+
+    // ── Confirmation modal ─────────────────────────────────────────────────
+    // The modal has two exit paths: confirm (proceed with send) and cancel.
+    // confirmSend() is the real merge trigger — handleMergeClick() just opens
+    // the modal. This two-step prevents accidental large sends.
     document.getElementById("confirmSendBtn").addEventListener("click", confirmSend);
     document.getElementById("confirmCancelBtn").addEventListener("click", dismissModal);
 
+    // ── CSV upload ─────────────────────────────────────────────────────────
+    // The actual <input type="file"> is hidden; the button triggers a click on
+    // it programmatically. This pattern gives us full control over the button's
+    // appearance without fighting browser default file-input styling.
     document.getElementById("uploadCsvBtn").addEventListener("click", () => {
       document.getElementById("csvFileInput").click();
     });
     document.getElementById("csvFileInput").addEventListener("change", handleCsvFileUpload);
 
+    // ── Shared attachment upload ───────────────────────────────────────────
     document.getElementById("uploadAttachmentBtn").addEventListener("click", () => {
       document.getElementById("attachmentFileInput").click();
     });
     document.getElementById("attachmentFileInput").addEventListener("change", handleAttachmentUpload);
     document.getElementById("clearSharedAttachmentsBtn").addEventListener("click", clearSharedAttachments);
 
+    // ── Per-recipient attachment upload ────────────────────────────────────
+    // perRecipientFilesInput accepts a folder (or multiple files via multi-select).
+    // The "change" handler populates the perRecipientFiles Map keyed by filename.
     document.getElementById("uploadPerRecipientBtn").addEventListener("click", () => {
       document.getElementById("perRecipientFilesInput").click();
     });
     document.getElementById("perRecipientFilesInput").addEventListener("change", handlePerRecipientFilesUpload);
     document.getElementById("clearPerRecipientBtn").addEventListener("click", clearPerRecipientFiles);
 
+    // ── Inline images upload ────────────────────────────────────────────────
     document.getElementById("uploadInlineImagesBtn").addEventListener("click", () => {
       document.getElementById("inlineImagesInput").click();
     });
     document.getElementById("inlineImagesInput").addEventListener("change", handleInlineImagesUpload);
     document.getElementById("clearInlineImagesBtn").addEventListener("click", clearInlineImages);
 
+    // ── Scheduling accordion toggle ────────────────────────────────────────
+    // The "schedule" row is hidden until the checkbox is checked. We also
+    // update the scheduling badge (a visual indicator in the tab) so the user
+    // can see at a glance that scheduling is active even when the accordion is
+    // collapsed.
     document.getElementById("scheduleEnabled").addEventListener("change", (e) => {
       document.getElementById("scheduleRow").classList.toggle("hidden", !e.target.checked);
       updateSchedulingBadge();
     });
 
+    // ── Message expiry toggle ──────────────────────────────────────────────
     document.getElementById("expiryEnabled").addEventListener("change", (e) => {
       document.getElementById("expiryRow").classList.toggle("hidden", !e.target.checked);
     });
 
+    // ── Sending window toggle ──────────────────────────────────────────────
+    // The sending-window feature restricts sends to business hours. The row
+    // with the time/day controls is hidden until the feature is enabled.
     const sendingWindowEnabledEl = document.getElementById("sendingWindowEnabled");
     if (sendingWindowEnabledEl) {
       sendingWindowEnabledEl.addEventListener("change", function(e) {
@@ -573,6 +811,7 @@ Office.onReady((info) => {
       });
     }
 
+    // ── Custom X- headers toggle ───────────────────────────────────────────
     document.getElementById("customHeadersEnabled").addEventListener("change", (e) => {
       document.getElementById("customHeadersRow").classList.toggle("hidden", !e.target.checked);
     });
@@ -603,7 +842,10 @@ Office.onReady((info) => {
       if (previewIndex < previewRecipients.length - 1) { previewIndex++; renderPreviewEntry(); }
     });
 
-    // Batch delay label live update
+    // ── Batch delay range input ────────────────────────────────────────────
+    // The batchDelayInput slider controls how long to pause between batch
+    // requests. We update a human-readable label on every "input" event
+    // (not just "change") so the user sees feedback as they drag the slider.
     const batchDelayInput = document.getElementById("batchDelayInput");
     batchDelayInput.addEventListener("input", () => {
       const sec = parseFloat(batchDelayInput.value);
@@ -611,8 +853,11 @@ Office.onReady((info) => {
         sec === 0 ? "(no delay between batches)" : `(${sec} s between batches)`;
     });
 
+    // ── Subject / Body tag-target toggle ──────────────────────────────────
     // Helper: set tagTarget and keep the Body/Subject toggle pills in sync.
-    // Call this from any focus/blur/click handler so the UI always reflects reality.
+    // This is extracted into a named function rather than inlined because
+    // multiple event handlers (focus, blur, window blur, button click) all
+    // need to change the target — DRY principle.
     function applyTagTarget(target) {
       tagTarget = target;
       const bodyBtn    = document.getElementById("targetBodyBtn");
@@ -694,6 +939,12 @@ Office.onReady((info) => {
       if (e.key === "Enter") addCustomTag();
     });
 
+    // ── Subject input — localStorage sync + Outlook push ──────────────────
+    // Every keystroke: save to localStorage immediately (so it survives
+    // a task pane reload) AND debounce a push to Outlook's native subject
+    // field. We debounce at 400 ms because subject.setAsync is an async
+    // Office.js API call — calling it on every keystroke would queue up
+    // hundreds of overlapping async operations.
     document.getElementById("subjectInput").addEventListener("input", () => {
       const val = document.getElementById("subjectInput").value;
       lsSet(LS_KEY_SUBJECT, val);
@@ -702,29 +953,47 @@ Office.onReady((info) => {
       _subjectPushTimer = setTimeout(() => pushSubjectToOutlook(val), 400);
     });
 
-    // Sync button: pull current Outlook subject into taskpane on demand
+    // ── Sync subject button ────────────────────────────────────────────────
+    // Manual "pull from Outlook" button. The boolean arg (true) means "show
+    // a toast if the subject was updated" — useful for on-demand syncs where
+    // the user wants visible confirmation.
     const syncSubjectBtn = document.getElementById("syncSubjectBtn");
     if (syncSubjectBtn) {
       syncSubjectBtn.addEventListener("click", () => syncSubjectFromOutlook(true));
     }
 
+    // ── CSV textarea — localStorage autosave ──────────────────────────────
+    // We listen to both "input" (handles typing) and "change" (handles
+    // paste-via-context-menu and programmatic value changes that don't
+    // fire "input"). Both are needed for full coverage.
     const _csvInputEl = document.getElementById("csvInput");
     const _saveCsv = () => lsSet(LS_KEY_CSV, _csvInputEl.value);
     _csvInputEl.addEventListener("input", _saveCsv);
     _csvInputEl.addEventListener("change", _saveCsv);
 
+    // ── Restore previous session state ────────────────────────────────────
+    // restoreLocalState() reads localStorage and populates the subject input,
+    // CSV textarea, custom tags, and greeting config from the previous session.
+    // This must run BEFORE syncSubjectFromOutlook so the UI reflects the saved
+    // subject before we potentially overwrite it with Outlook's value.
     restoreLocalState();
 
-    // Sync subject from Outlook's native compose field on first load,
-    // then poll every 500 ms for live-like bidirectional sync between
-    // Outlook's compose field and the taskpane subject input.
+    // ── Subject bidirectional sync ────────────────────────────────────────
+    // Initial sync: pull the native Outlook subject into the taskpane on load.
+    // Then poll every 500 ms so edits in Outlook's native subject box appear
+    // in the taskpane in near-real-time. 500 ms is a compromise — fast enough
+    // to feel responsive, slow enough not to overwhelm the Office.js bridge.
     syncSubjectFromOutlook(true);
     _subjectPollTimer = setInterval(() => syncSubjectFromOutlook(false), 500);
 
-    initTabs();
-    initAccordions();
-    initOptOutUI();
+    // ── Initialise UI subsystems ───────────────────────────────────────────
+    initTabs();       // Set up the tab-switching logic (Recipients / Compose / Options)
+    initAccordions(); // Set up the expand/collapse accordion sections
+    initOptOutUI();   // Load suppressionSet from localStorage and render the opt-out list
 
+    // ── Footer log toggle ──────────────────────────────────────────────────
+    // The footer shows a one-line "mini log" by default; clicking the toggle
+    // expands the full scrollable log panel. Both panels hide when the other shows.
     document.getElementById("toggleLogBtn").addEventListener("click", () => {
       const mini = document.getElementById("footerLogMini");
       const full = document.getElementById("fullLogArea");
@@ -733,32 +1002,44 @@ Office.onReady((info) => {
       mini.classList.toggle("hidden", open);
     });
 
-    // Import from Contacts (Feature 1)
+    // ── Contacts import modal ──────────────────────────────────────────────
+    // handleImportContacts() fetches contacts from Graph and renders a
+    // checkbox list in the modal. The search input filters the rendered list
+    // client-side (no re-fetch) using filterContacts().
     document.getElementById("importContactsBtn").addEventListener("click", handleImportContacts);
     document.getElementById("contactsCloseBtn").addEventListener("click", () => {
       document.getElementById("contactsModal").classList.add("hidden");
     });
     document.getElementById("contactsSearch").addEventListener("input", (e) => filterContacts(e.target.value));
+    // Select-all button: if all visible checkboxes are already checked, uncheck
+    // all (toggle-off); otherwise check all. Uses spread to convert NodeList.
     document.getElementById("contactsSelectAllBtn").addEventListener("click", () => {
       const visible = document.getElementById("contactsList").querySelectorAll("input[type=checkbox]");
       const allChecked = [...visible].every(cb => cb.checked);
       visible.forEach(cb => {
         cb.checked = !allChecked;
+        // Maintain the selectedContacts Set alongside checkbox state.
         if (!allChecked) selectedContacts.add(cb.dataset.email);
         else selectedContacts.delete(cb.dataset.email);
       });
       updateContactsSelectedCount();
     });
+    // The import button serves both contacts and directory — delegate based on
+    // which sub-tab is currently active.
     document.getElementById("contactsImportBtn").addEventListener("click", () => {
       if (contactsActiveTab === "directory") importDirectorySelected();
       else importSelectedContacts();
     });
 
-    // Filter / sort bar (Feature 4)
+    // ── Recipient filter / sort bar ────────────────────────────────────────
     document.getElementById("applyFilterBtn").addEventListener("click", applyFilterSort);
     document.getElementById("clearFilterBtn").addEventListener("click", clearFilterSort);
 
-    // Match Fields modal (Feature 1)
+    // ── Match Fields modal ─────────────────────────────────────────────────
+    // Opens a dialog that maps the user's CSV column names to the canonical
+    // field names (email, first_name, etc.) that the add-in expects.
+    // We filter out internal "_"-prefixed keys (like _originalIndex) from
+    // the header list — those are implementation details, not real columns.
     document.getElementById("mapFieldsBtn").addEventListener("click", () => {
       const headers = parsedRecipients.length > 0 ? Object.keys(parsedRecipients[0]).filter(k => !k.startsWith("_")) : [];
       openMatchFieldsModal(headers);
@@ -771,30 +1052,39 @@ Office.onReady((info) => {
     });
     document.getElementById("matchFieldsApplyBtn").addEventListener("click", applyMatchFields);
 
-    // Body template save/load (Feature 2)
+    // ── Body template save/load ────────────────────────────────────────────
     document.getElementById("saveBodyToTemplateBtn").addEventListener("click", saveBodyToTemplate);
     document.getElementById("loadBodyFromTemplateBtn").addEventListener("click", loadBodyFromTemplate);
 
-    // Greeting line config (Feature 3)
+    // ── Greeting-line configuration ────────────────────────────────────────
+    // Persist the greeting config to localStorage on every change so it
+    // survives page refreshes. The "change" event is used for the select
+    // (fires when the user picks an option) and "input" for the text field.
     document.getElementById("greetingFormat").addEventListener("change", () => {
       greetingConfig.format = document.getElementById("greetingFormat").value;
       lsSet(LS_KEY_GREETING, JSON.stringify(greetingConfig));
     });
     document.getElementById("greetingFallback").addEventListener("input", () => {
+      // Fall back to the default string rather than saving an empty fallback,
+      // which would result in blank greeting lines for recipients missing names.
       greetingConfig.fallback = document.getElementById("greetingFallback").value.trim() || "Dear Valued Customer";
       lsSet(LS_KEY_GREETING, JSON.stringify(greetingConfig));
     });
 
-    // Save as Drafts (Feature 5)
+    // ── Save as Drafts mode ────────────────────────────────────────────────
     document.getElementById("saveDraftsBtn").addEventListener("click", handleSaveDrafts);
 
-    // Check for Errors (Feature 1 v1.8)
+    // ── Check for Errors pre-flight ────────────────────────────────────────
+    // Opens a modal that runs pre-send validation checks without sending
+    // anything: required fields, duplicate emails, attachment sizes, etc.
     document.getElementById("checkErrorsBtn").addEventListener("click", handleCheckErrors);
     document.getElementById("checkErrorsCloseBtn").addEventListener("click", () => {
+      // _closeModalWithTrap restores focus to the previously focused element
+      // (accessibility requirement — modals must return focus on close).
       _closeModalWithTrap("checkErrorsModal"); // Feature 15
     });
 
-    // Edit recipient table modal
+    // ── Edit recipient table modal ─────────────────────────────────────────
     document.getElementById("editTableCloseBtn").addEventListener("click", () => {
       document.getElementById("editTableModal").classList.add("hidden");
     });
@@ -819,7 +1109,12 @@ Office.onReady((info) => {
     // Multi-criteria filter (v1.9.0)
     document.getElementById("addFilterCondBtn").addEventListener("click", () => addFilterCondition());
 
-    // Contacts modal tabs (Feature 3 v1.8)
+    // ── Contacts modal sub-tabs ────────────────────────────────────────────
+    // The contacts modal has three sub-tabs: Contacts (personal address book),
+    // Groups (contact groups / distribution lists), and Directory (GAL / People API).
+    // Switching tabs updates contactsActiveTab and shows/hides the appropriate
+    // panels. We manipulate style.display directly (rather than class toggling)
+    // because we need precise control over which elements are visible in each tab.
     document.getElementById("contactsTabContacts").addEventListener("click", () => {
       contactsActiveTab = "contacts";
       document.getElementById("contactsTabContacts").classList.add("active");
@@ -871,14 +1166,22 @@ Office.onReady((info) => {
         '<p style="padding:8px;color:#605e5c;">Type at least 2 characters to search.</p>';
     });
 
-    // Directory search input — debounced
+    // ── Directory search — debounced ───────────────────────────────────────
+    // We debounce the search at 400 ms to avoid firing a Graph API request on
+    // every keystroke. The local timer variable is scoped inside onReady so
+    // it doesn't pollute the module scope.
     let directorySearchTimer = null;
     document.getElementById("directorySearch").addEventListener("input", (e) => {
       clearTimeout(directorySearchTimer);
       directorySearchTimer = setTimeout(() => searchDirectory(e.target.value.trim()), 400);
     });
 
-    // UX 3: keyboard activation for static tag chips (Enter / Space)
+    // ── Keyboard: Enter/Space activates tag chips ──────────────────────────
+    // Tag chips have tabIndex=0 so they're focusable, but they're <span>
+    // elements, not <button>s — browsers don't fire click events for Enter/Space
+    // on non-interactive elements. We polyfill that behaviour here globally.
+    // The check for e.target.classList.contains("tag") is intentionally broad —
+    // it catches both DEFAULT_TAGS chips and user-defined custom tag chips.
     document.addEventListener("keydown", (e) => {
       if ((e.key === "Enter" || e.key === " ") && e.target.classList.contains("tag")) {
         e.preventDefault();
@@ -886,7 +1189,11 @@ Office.onReady((info) => {
       }
     });
 
-    // UX 5: Escape key closes the topmost visible modal
+    // ── Keyboard: Escape closes topmost visible modal ──────────────────────
+    // This single listener handles ALL modals rather than each modal adding its
+    // own Escape handler, which would create dozens of competing listeners.
+    // We iterate the list in display-priority order and close only the first
+    // visible one — prevents accidentally closing two modals at once.
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
       const visibleModals = [
@@ -897,6 +1204,9 @@ Office.onReady((info) => {
       for (const id of visibleModals) {
         const el = document.getElementById(id);
         if (el && !el.classList.contains("hidden")) {
+          // Prefer clicking the cancel/close button so it runs any cleanup logic
+          // (e.g. _closeModalWithTrap restoring focus). Fall back to just hiding
+          // the element if no cancel button is found.
           const cancelBtn = el.querySelector(
             "#fillInCancelBtn, #preSendCancelBtn, #confirmCancelBtn, #dupeSendCancelBtn, " +
             "#checkErrorsCloseBtn, #previewCloseBtn, #matchFieldsCancelBtn, #contactsCloseBtn, " +
@@ -905,12 +1215,16 @@ Office.onReady((info) => {
           );
           if (cancelBtn) cancelBtn.click();
           else el.classList.add("hidden");
-          break;
+          break; // Only close the topmost modal
         }
       }
     });
 
-    // UX 8: hide retry button when CSV textarea is manually cleared
+    // ── CSV clear → reset retry state ─────────────────────────────────────
+    // When the user manually clears the CSV textarea, the failedRecipients list
+    // is no longer valid (it references rows from the previous CSV). Hide the
+    // retry button and reset the list to prevent a stale retry from sending to
+    // the wrong people.
     document.getElementById("csvInput")?.addEventListener("input", () => {
       if (!document.getElementById("csvInput").value.trim()) {
         document.getElementById("retryFailedBtn")?.classList.add("hidden");
@@ -918,18 +1232,21 @@ Office.onReady((info) => {
       }
     });
 
-    // ── Smart paste detection ──────────────────────────────────────
-    // When a user pastes tab-separated content (Excel/Sheets copy),
-    // automatically convert it to CSV so they don't need to save as .csv first.
+    // ── Smart paste detection ──────────────────────────────────────────────
+    // When a user pastes tab-separated content (Excel/Sheets copy), automatically
+    // convert it to CSV so they don't need to export from Excel first.
+    // We guard on "majority of lines contain tabs" (≥50%) to avoid converting
+    // normal text that happens to contain a single tab.
     document.getElementById("csvInput")?.addEventListener("paste", (e) => {
       const raw = (e.clipboardData || window.clipboardData)?.getData("text");
       if (!raw) return;
       const lines = raw.split(/\r?\n/);
-      // Tab-separated if the majority of lines contain tabs
+      // Tab-separated if the majority of lines contain tabs.
       const tabLines = lines.filter(l => l.includes("\t")).length;
-      if (tabLines < Math.max(1, lines.length * 0.5)) return; // not tab-separated
-      e.preventDefault();
-      // Convert: tabs → commas, quote fields that contain commas
+      if (tabLines < Math.max(1, lines.length * 0.5)) return; // not tab-separated — leave paste unmodified
+      e.preventDefault(); // We'll insert the converted CSV ourselves
+      // RFC 4180 quoting: fields containing commas, quotes, or newlines must be
+      // double-quoted, with internal quotes escaped by doubling them ("").
       const csv = lines.map(line =>
         line.split("\t").map(cell => {
           if (cell.includes(",") || cell.includes('"') || cell.includes("\n")) {
@@ -938,21 +1255,29 @@ Office.onReady((info) => {
           return cell;
         }).join(",")
       ).join("\n");
+      // Insert at cursor position (replacing any selection) rather than
+      // appending to the end, so paste works naturally at any cursor location.
       const ta = document.getElementById("csvInput");
       const start = ta.selectionStart, end = ta.selectionEnd;
       ta.value = ta.value.slice(0, start) + csv + ta.value.slice(end);
       ta.selectionStart = ta.selectionEnd = start + csv.length;
+      // Dispatch both "input" and "change" to ensure the autosave handler
+      // and any other listeners pick up the new value.
       ta.dispatchEvent(new Event("input"));
       ta.dispatchEvent(new Event("change"));
       log("Detected Excel/Sheets table paste — converted to CSV automatically.", "info");
     });
 
-    // ── Drag-and-drop CSV / Excel files ───────────────────────────
+    // ── Drag-and-drop CSV / Excel onto the drop zone ───────────────────────
+    // The drop zone is an overlay on the CSV textarea. We intercept dragover to
+    // show visual feedback, and on drop we inject the file into the hidden
+    // csvFileInput and trigger its "change" handler — reusing all the existing
+    // file-type detection and parsing code without duplication.
     const csvDropZone = document.getElementById("csvDropZone");
     if (csvDropZone) {
       csvDropZone.addEventListener("dragover", (e) => {
-        e.preventDefault();
-        csvDropZone.classList.add("drag-over");
+        e.preventDefault(); // Must preventDefault to allow drop
+        csvDropZone.classList.add("drag-over"); // CSS highlights the drop target
       });
       csvDropZone.addEventListener("dragleave", () => {
         csvDropZone.classList.remove("drag-over");
@@ -962,34 +1287,48 @@ Office.onReady((info) => {
         csvDropZone.classList.remove("drag-over");
         const file = e.dataTransfer?.files?.[0];
         if (!file) return;
-        // Reuse the existing file upload handler by injecting the file into csvFileInput
+        // DataTransfer API: the only cross-browser way to programmatically set
+        // an <input type="file">'s file list. We can't assign .files directly.
         const dt = new DataTransfer();
         dt.items.add(file);
         const fi = document.getElementById("csvFileInput");
         fi.files = dt.files;
-        fi.dispatchEvent(new Event("change"));
+        fi.dispatchEvent(new Event("change")); // Trigger the upload handler
       });
     }
 
-    // ── Quick email entry mode toggle ─────────────────────────────
+    // ── Quick email entry mode ─────────────────────────────────────────────
+    // Quick mode replaces the CSV textarea with a simple one-email-per-line input.
+    // toggleQuickMode() switches the visible panel and updateQuickModeCSV()
+    // converts the plain text into a single-column CSV in the background.
     document.getElementById("quickModeBtn")?.addEventListener("click", toggleQuickMode);
     document.getElementById("quickEmailInput")?.addEventListener("input", () => {
-      updateQuickModeCSV();
+      updateQuickModeCSV(); // Convert current lines to CSV and update parsedRecipients
     });
 
-    // ── Sync recipients from Outlook's native To field ────────────
+    // ── Import recipients from Outlook's native To field ──────────────────
+    // syncRecipientsFromOutlook() reads the compose To recipients via
+    // Office.js toRecipients.getAsync, converts them to CSV rows, and clears
+    // Outlook's To field so the merge engine can repopulate it per-recipient.
     document.getElementById("syncRecipientsBtn")?.addEventListener("click", () => {
       syncRecipientsFromOutlook();
     });
 
-    // Feature 8: load persisted rate limit state
+    // ── Rate limiting — restore persisted state ────────────────────────────
+    // loadRateLimitState() reads maxPerHour and dailyCap from localStorage
+    // so the user's limits survive page reloads.
     loadRateLimitState();
 
-    // UX 7: wire rate limit badge to maxPerHour and dailyCap inputs
+    // Whenever the user changes the rate limit inputs, update the badge
+    // in the tab that shows the active limit.
     document.getElementById("maxPerHour")?.addEventListener("input", updateRateLimitBadge);
     document.getElementById("dailyCap")?.addEventListener("input", updateRateLimitBadge);
 
-    // Feature 3: sample CSV download
+    // ── Sample CSV download ────────────────────────────────────────────────
+    // Provides a minimal working example CSV so first-time users can see the
+    // expected format without reading documentation. The URL.createObjectURL /
+    // revokeObjectURL pattern is the browser-standard way to trigger a download
+    // from in-memory data without hitting a server.
     document.getElementById("downloadSampleCsv")?.addEventListener("click", (e) => {
       e.preventDefault();
       const sampleCsv = [
@@ -997,20 +1336,25 @@ Office.onReady((info) => {
         "alice@example.com,Alice,Smith,Acme Corp,Director",
         "bob@example.com,Bob,Jones,Globex,Manager",
         "carol@example.com,Carol,Williams,Initech,Analyst"
-      ].join("\r\n");
+      ].join("\r\n"); // CRLF line endings per RFC 4180
       const blob = new Blob([sampleCsv], { type: "text/csv" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = "mail-merge-sample.csv";
-      a.click();
-      URL.revokeObjectURL(url);
+      a.click(); // Programmatic click triggers the browser's Save dialog
+      URL.revokeObjectURL(url); // Free the blob URL — important for memory hygiene
     });
 
-    // Feature 10: simulate button
+    // ── Simulate / dry-run mode ────────────────────────────────────────────
+    // handleSimulate() runs the full merge logic (personalisation, conditionals,
+    // dedup, suppression check) but skips the Graph API call — useful for
+    // validating a campaign before committing to a real send.
     document.getElementById("simulateBtn")?.addEventListener("click", handleSimulate);
 
-    // Feature 13: getting started banner
+    // ── Getting-started banner ─────────────────────────────────────────────
+    // Only shown on first run (no welcome dismissal flag AND no saved CSV).
+    // The flag is set when the user dismisses it, so it only shows once.
     const hasSeenWelcome = lsGet("mm_welcome_dismissed", null);
     const hasCsv = !!lsGet(LS_KEY_CSV, null);
     if (!hasSeenWelcome && !hasCsv) {
@@ -1186,8 +1530,18 @@ function pushSubjectToOutlook(value) {
    the CSV barrier for non-technical users doing small sends.
    ─────────────────────────────────────────────────────────────── */
 
+// _quickModeActive: tracks whether the add-in is currently in quick-entry mode.
+// Module-scoped so toggleQuickMode() and updateQuickModeCSV() share the same flag.
 let _quickModeActive = false;
 
+/**
+ * toggleQuickMode() — switch between CSV mode and quick email-entry mode.
+ *
+ * Quick mode shows a simple textarea where users type/paste one email per line.
+ * Under the hood it still generates a CSV and calls parseAndPreview(), so the
+ * rest of the merge pipeline is unchanged — this is purely a UX simplification.
+ * The CSV area and quick area are mutually exclusive panels toggled here.
+ */
 function toggleQuickMode() {
   _quickModeActive = !_quickModeActive;
   const btn     = document.getElementById("quickModeBtn");
@@ -1195,10 +1549,10 @@ function toggleQuickMode() {
   const qArea   = document.getElementById("quickSection");
 
   if (_quickModeActive) {
-    csvArea?.classList.add("hidden");
-    qArea?.classList.remove("hidden");
+    csvArea?.classList.add("hidden");    // hide the full CSV panel
+    qArea?.classList.remove("hidden");  // show the simple email-entry panel
     if (btn) btn.textContent = "📋 Switch to CSV mode";
-    document.getElementById("quickEmailInput")?.focus();
+    document.getElementById("quickEmailInput")?.focus(); // put cursor in the input immediately
   } else {
     csvArea?.classList.remove("hidden");
     qArea?.classList.add("hidden");
@@ -1206,17 +1560,34 @@ function toggleQuickMode() {
   }
 }
 
+// _quickModeParseTimer: debounce handle for updateQuickModeCSV → parseAndPreview.
+// Without debouncing, every keystroke in the quick-entry textarea would
+// trigger a full CSV parse + DOM render, which is wasteful and can cause
+// visible flicker on long lists.
 let _quickModeParseTimer = null;
 
+/**
+ * updateQuickModeCSV() — convert quick-entry textarea content into a CSV and
+ * trigger parseAndPreview().
+ *
+ * The function reads the raw quick-entry textarea, splits on newlines/commas/
+ * semicolons, filters out anything that isn't a valid email address, then
+ * synthesises a minimal single-column CSV ("email\n...") in the hidden csvInput
+ * textarea. This keeps all downstream logic (parseCSV, validateRecipients, etc.)
+ * working exactly as if the user had typed the CSV manually.
+ */
 function updateQuickModeCSV() {
   const raw = document.getElementById("quickEmailInput")?.value || "";
+  // Accept newline-, comma-, or semicolon-separated addresses.
+  // EMAIL_REGEX.test() filters out blank lines and any non-email entries.
   const emails = raw.split(/[\n,;]+/).map(e => e.trim()).filter(e => e && EMAIL_REGEX.test(e));
   const csvInput = document.getElementById("csvInput");
   if (!csvInput) return;
 
   if (emails.length === 0) {
-    // Textarea cleared — wipe the recipient list and preview immediately
-    // without calling parseAndPreview() (which would wrongly open Match Fields on an empty CSV)
+    // Textarea cleared — wipe the recipient list and preview immediately.
+    // We do NOT call parseAndPreview() here because an empty CSV would trigger
+    // the Match Fields dialog, which is wrong in this context.
     csvInput.value = "";
     parsedRecipients = [];
     selectedRowIndices = null;
@@ -1226,10 +1597,12 @@ function updateQuickModeCSV() {
     return;
   }
 
+  // Build a minimal single-column CSV with just the email header and addresses.
   csvInput.value = "email\n" + emails.join("\n");
+  // Dispatch both events so the autosave handler and any other listeners fire.
   csvInput.dispatchEvent(new Event("input"));
   csvInput.dispatchEvent(new Event("change"));
-  // Debounce parseAndPreview — don't re-parse on every keypress
+  // Debounce the expensive parse — only run 350 ms after the user pauses typing.
   clearTimeout(_quickModeParseTimer);
   _quickModeParseTimer = setTimeout(() => parseAndPreview(), 350);
 }
@@ -1239,6 +1612,19 @@ function updateQuickModeCSV() {
    the CSV with those addresses — great for small ad-hoc sends.
    ─────────────────────────────────────────────────────────────── */
 
+/**
+ * syncRecipientsFromOutlook() — import the native Outlook To-field addresses into
+ * the recipient CSV and then clear Outlook's To field.
+ *
+ * Why clear the To field? Because the merge engine sends each email individually
+ * via Graph — if the To field still contains all recipients, they'd also receive
+ * the email as CC/TO on every other recipient's personalised copy. Clearing it
+ * gives the merge engine a clean slate to set the single per-recipient To address.
+ *
+ * This function uses Office.js toRecipients.getAsync which is available in all
+ * Outlook compose-mode contexts (desktop, web, mobile). The result is an array
+ * of EmailAddressDetails objects: { emailAddress, displayName }.
+ */
 function syncRecipientsFromOutlook() {
   try {
     Office.context.mailbox.item.to.getAsync(result => {
@@ -1251,6 +1637,9 @@ function syncRecipientsFromOutlook() {
         log("Outlook's To field is empty — add addresses there first.", "warning");
         return;
       }
+      // Build a two-column CSV with email and display_name columns.
+      // We strip commas from display names because commas are the CSV delimiter —
+      // they'd break parsing if left in an unquoted field.
       const csvLines = ["email,display_name"];
       recipients.forEach(r => {
         const addr = (r.emailAddress || "").trim();
@@ -1260,12 +1649,14 @@ function syncRecipientsFromOutlook() {
       const csvInput = document.getElementById("csvInput");
       if (csvInput) {
         csvInput.value = csvLines.join("\n");
+        // Fire both events to trigger autosave and any other change listeners.
         csvInput.dispatchEvent(new Event("input"));
         csvInput.dispatchEvent(new Event("change"));
-        parseAndPreview();
+        parseAndPreview(); // Parse the newly set CSV and update the recipient table
         log(`Imported ${recipients.length} address${recipients.length !== 1 ? "es" : ""} from Outlook's To field.`, "success");
       }
-      // Clear Outlook's To field so the merge engine populates it per-recipient
+      // Clear Outlook's To field — setAsync([]) removes all recipients.
+      // The empty callback is intentional: we don't care about the result.
       Office.context.mailbox.item.to.setAsync([], () => {});
     });
   } catch (e) {
@@ -1437,12 +1828,35 @@ function saveCustomTagsToStorage() {
   lsSet(LS_KEY_TAGS, JSON.stringify(tags));
 }
 
-/* ─── TEMPLATE SAVE / LOAD ─────────────────────────────────────── */
+/* ─── TEMPLATE SAVE / LOAD ─────────────────────────────────────────────────
+   Templates let users save their full compose configuration (subject, options,
+   scheduling settings) under a name and restore it later. Templates are stored
+   in localStorage as a plain object: { "Template Name": stateObject }.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * getTemplates() — load the templates object from localStorage.
+ *
+ * Returns a plain object where keys are template names and values are the
+ * state snapshots produced by getTemplateState(). Returns an empty object
+ * if nothing has been saved yet.
+ *
+ * @returns {Object} { [name: string]: templateState }
+ */
 function getTemplates() {
   return JSON.parse(lsGet(LS_KEY_TEMPLATES) || "{}");
 }
 
+/**
+ * getTemplateState() — snapshot all saveable UI settings into a plain object.
+ *
+ * This is called when the user saves a template. Every property here corresponds
+ * to a UI element that applyTemplateState() must restore. Keep these two functions
+ * in sync — if you add a new option to the add-in, add it here AND in
+ * applyTemplateState() or it won't be saved/restored.
+ *
+ * @returns {Object} A complete snapshot of the current UI state
+ */
 function getTemplateState() {
   return {
     subject:         document.getElementById("subjectInput").value,
@@ -1463,7 +1877,8 @@ function getTemplateState() {
     sendAs:          document.getElementById("sendAsInput").value,
     greetingFormat:  greetingConfig.format,
     greetingFallback: greetingConfig.fallback,
-    // Feature 11: scheduling and rate limit settings
+    // Scheduling and rate-limit settings — use ?. and || "" fallbacks because
+    // these elements may not exist in older HTML versions.
     scheduleEnabled:      document.getElementById("scheduleEnabled")?.checked || false,
     scheduledTime:        document.getElementById("scheduledTime")?.value || "",
     sendingWindowEnabled: document.getElementById("sendingWindowEnabled")?.checked || false,
@@ -1521,7 +1936,9 @@ function applyTemplateState(state) {
   if (state.jitterMin   !== undefined) { const el = document.getElementById("jitterMinInput"); if (el) el.value = state.jitterMin; }
   if (state.jitterMax   !== undefined) { const el = document.getElementById("jitterMaxInput"); if (el) el.value = state.jitterMax; }
 
-  // UX 9: if scheduling settings were restored as active, expand the scheduling accordion
+  // Auto-expand the scheduling accordion if any scheduling setting was saved as active.
+  // It's confusing to restore a checked "Enable scheduling" checkbox inside a
+  // collapsed accordion — the user can't see that scheduling is now active.
   if (state.scheduleEnabled || state.sendingWindowEnabled) {
     const schBody = document.getElementById("accordion-scheduling");
     if (schBody && schBody.classList.contains("hidden")) {
@@ -1534,7 +1951,8 @@ function applyTemplateState(state) {
       }
     }
   }
-  // UX 9: if rate limit settings were restored as active, expand the advanced accordion
+  // Similarly expand the advanced accordion if a rate limit was restored.
+  // parseInt with radix 10: a stored "0" should evaluate to 0, not NaN.
   const mphRestored = parseInt(state.maxPerHour || "0", 10);
   const dcRestored  = parseInt(state.dailyCap   || "0", 10);
   if (mphRestored > 0 || dcRestored > 0) {
@@ -1550,11 +1968,16 @@ function applyTemplateState(state) {
     }
   }
 
-  // UX 7: refresh badges after template restore
+  // Refresh the scheduling and rate-limit badges to reflect the restored values.
   updateSchedulingBadge();
   updateRateLimitBadge();
 }
 
+/**
+ * saveTemplate() — save the current UI state under the name in #templateNameInput.
+ * Uses getTemplateState() to capture all relevant settings, then serialises
+ * the entire templates object to localStorage.
+ */
 function saveTemplate() {
   const name = document.getElementById("templateNameInput").value.trim();
   if (!name) { log("Enter a template name.", "warning"); return; }
@@ -1562,11 +1985,17 @@ function saveTemplate() {
   templates[name] = getTemplateState();
   lsSet(LS_KEY_TEMPLATES, JSON.stringify(templates));
   populateTemplateSelect();
+  // Pre-select the newly saved name in the dropdown so the user can immediately
+  // load or delete it without scrolling.
   document.getElementById("templateSelect").value = name;
   document.getElementById("deleteTemplateBtn").disabled = false;
   log(`Template "${name}" saved.`, "success");
 }
 
+/**
+ * loadTemplate() — restore the template selected in #templateSelect.
+ * Calls applyTemplateState() to push all saved values into the UI.
+ */
 function loadTemplate() {
   const name = document.getElementById("templateSelect").value;
   if (!name) { document.getElementById("deleteTemplateBtn").disabled = true; return; }
@@ -1578,36 +2007,66 @@ function loadTemplate() {
   log(`Template "${name}" loaded.`, "info");
 }
 
+/**
+ * deleteTemplate() — remove the selected template from localStorage.
+ * Re-renders the template list so the deleted name disappears from the dropdown.
+ */
 function deleteTemplate() {
   const name = document.getElementById("templateSelect").value;
   if (!name) { log("Select a template to delete.", "error"); return; }
   const templates = getTemplates();
-  delete templates[name];
+  delete templates[name]; // Remove the key from the object before re-serialising
   lsSet(LS_KEY_TEMPLATES, JSON.stringify(templates));
   renderTemplateList();
   log(`Template "${name}" deleted.`, "info");
 }
 
+/**
+ * renderTemplateList() — rebuild the #templateSelect dropdown from localStorage.
+ *
+ * Escapes template names before inserting into innerHTML to prevent XSS via
+ * a maliciously crafted template name.
+ */
 function renderTemplateList() {
   const sel = document.getElementById("templateSelect");
   const templates = getTemplates();
   const names = Object.keys(templates);
   sel.innerHTML = `<option value="">— load template —</option>` +
     names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+  // Disable delete button when no templates exist — nothing to delete.
   document.getElementById("deleteTemplateBtn").disabled = names.length === 0;
 }
 
-// Alias used by saveTemplate / loadTemplate (Feature 5)
+// populateTemplateSelect: alias kept for backwards compatibility.
+// Earlier versions called this name; newer code uses renderTemplateList() directly.
 function populateTemplateSelect() { renderTemplateList(); }
 
-/* ─── MATCH FIELDS DIALOG (Feature 1) ──────────────────────────── */
+/* ─── MATCH FIELDS DIALOG ───────────────────────────────────────────────────
+   The Match Fields dialog lets users map their CSV column names to the canonical
+   field names the add-in understands. For example: a CSV with "Email Address"
+   maps to the canonical "email" key. Without this, users with non-standard CSV
+   headers would get no personalisation — every {{first_name}} would be blank.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * openMatchFieldsModal(csvHeaders) — render a row of label + <select> for each
+ * canonical field, pre-selecting the best auto-match candidate.
+ *
+ * Builds the modal body purely in memory as an HTML string, then sets
+ * innerHTML in one operation — much faster than appending DOM nodes one by one
+ * when there are 14 rows. escapeHtml() on every user-supplied value prevents
+ * XSS via malicious CSV header names.
+ *
+ * @param {string[]} csvHeaders - Column headers from the parsed CSV
+ */
 function openMatchFieldsModal(csvHeaders) {
   const body = document.getElementById("matchFieldsBody");
   body.innerHTML = CANONICAL_FIELDS.map(f => {
     const currentMapping = fieldMapping[f.key] || "";
     const options = ['<option value="">— skip —</option>']
       .concat(csvHeaders.map(h => {
+        // Auto-select if: (1) the user hasn't manually mapped this field yet,
+        // AND (2) this header matches one of the known synonyms.
         const autoMatch = autoMatchField(f.key, h) && !currentMapping;
         const selected = currentMapping === h ? " selected" : (autoMatch ? " selected" : "");
         return `<option value="${escapeHtml(h)}"${selected}>${escapeHtml(h)}</option>`;
@@ -1620,7 +2079,20 @@ function openMatchFieldsModal(csvHeaders) {
   document.getElementById("matchFieldsModal").classList.remove("hidden");
 }
 
+/**
+ * autoMatchField(canonicalKey, csvHeader) — fuzzy-match a CSV column header to
+ * a canonical field name by checking against a synonym list.
+ *
+ * Normalises both keys by lowercasing and stripping spaces, hyphens, and
+ * underscores before comparing — so "First Name", "first_name", and "firstname"
+ * all match the canonical "first_name" field.
+ *
+ * @param {string} canonicalKey - A CANONICAL_FIELDS key (e.g. "email", "first_name")
+ * @param {string} csvHeader    - A raw column header from the user's CSV
+ * @returns {boolean} true if the header is a recognised synonym for this field
+ */
 function autoMatchField(canonicalKey, csvHeader) {
+  // Normalise: lowercase + strip all non-alpha characters to produce a bare key.
   const h = csvHeader.toLowerCase().replace(/[\s_-]+/g, "");
   const synonyms = {
     email:        ["email", "emailaddress", "e-mail", "mail"],
@@ -1641,10 +2113,18 @@ function autoMatchField(canonicalKey, csvHeader) {
   return (synonyms[canonicalKey] || []).includes(h);
 }
 
+/**
+ * applyMatchFields() — read the user's mapping selections from the modal and
+ * store them in the fieldMapping object, then re-parse the CSV.
+ *
+ * Validates that the "email" field has been mapped before closing the modal —
+ * without it, the merge can't address any emails.
+ */
 function applyMatchFields() {
   const selects = document.getElementById("matchFieldsBody").querySelectorAll("select");
   const newMapping = {};
   selects.forEach(sel => {
+    // data-canonical holds the canonical key; sel.value holds the CSV column name.
     if (sel.value) newMapping[sel.dataset.canonical] = sel.value;
   });
   if (!newMapping.email) {
@@ -1655,15 +2135,31 @@ function applyMatchFields() {
   fieldMapping = newMapping;
   document.getElementById("matchFieldsModal").classList.add("hidden");
   log(`Field mapping applied. Email column: "${fieldMapping.email}".`, "success");
-  // Re-parse with new mapping
+  // Re-parse so the recipient table and validation immediately reflect the mapping.
   parseAndPreview();
 }
 
+/**
+ * applyFieldMapping(rawRow) — remap a single parsed-CSV row's keys from the
+ * user's column names to the canonical field names.
+ *
+ * When fieldMapping is empty (the user hasn't opened Match Fields), the raw
+ * row is returned unchanged — this is the common case when the CSV already
+ * uses canonical column names.
+ *
+ * We use Object.assign to keep the original columns alongside the mapped ones —
+ * custom columns not in CANONICAL_FIELDS still need to be accessible as
+ * personalisation tokens (e.g. {{promo_code}} from a non-standard column).
+ *
+ * @param {Object} rawRow - A single row object from parseCSV()
+ * @returns {Object} Row with canonical keys added/overwritten
+ */
 function applyFieldMapping(rawRow) {
-  if (!Object.keys(fieldMapping).length) return rawRow;
-  const mapped = Object.assign({}, rawRow); // keep original columns too
+  if (!Object.keys(fieldMapping).length) return rawRow; // No mapping — pass through unchanged
+  const mapped = Object.assign({}, rawRow); // Shallow copy — don't mutate the original
   CANONICAL_FIELDS.forEach(f => {
     const csvCol = fieldMapping[f.key];
+    // Only remap if there's a mapping for this field AND the CSV has that column.
     if (csvCol && rawRow[csvCol] !== undefined) {
       mapped[f.key] = rawRow[csvCol];
     }
@@ -1671,16 +2167,30 @@ function applyFieldMapping(rawRow) {
   return mapped;
 }
 
-/* ─── BODY TEMPLATE SAVE / LOAD (Feature 2) ────────────────────── */
+/* ─── BODY TEMPLATE SAVE / LOAD ────────────────────────────────────────────
+   These functions read the Outlook compose body (via Office.js body.getAsync)
+   and store/restore it as part of a named template in localStorage.
+   The body is stored as raw HTML — Outlook's compose HTML, which includes
+   inline styles and potentially base64-encoded images.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * saveBodyToTemplate() — read the current compose body HTML and store it
+ * in the named template in localStorage.
+ *
+ * Uses the template name from #templateNameInput (preferred) or the currently
+ * selected template in #templateSelect. Creates the template entry if it
+ * doesn't already exist so the body can be saved independently of the settings.
+ */
 async function saveBodyToTemplate() {
+  // Accept name from the new-template input OR from the existing-template dropdown.
   const name = document.getElementById("templateNameInput").value.trim()
              || document.getElementById("templateSelect").value;
   if (!name) { log("Select or name a template first.", "warning"); return; }
   try {
-    const body = await getComposeBodyAsync();
+    const body = await getComposeBodyAsync(); // Async Office.js call — must await
     const templates = lsGet(LS_KEY_TEMPLATES, {});
-    if (!templates[name]) templates[name] = {};
+    if (!templates[name]) templates[name] = {}; // Create entry if it doesn't exist
     templates[name].body = body;
     lsSet(LS_KEY_TEMPLATES, JSON.stringify(templates));
     log(`Body saved to template "${name}".`, "success");
@@ -1689,6 +2199,13 @@ async function saveBodyToTemplate() {
   }
 }
 
+/**
+ * loadBodyFromTemplate() — restore a previously saved body HTML into the
+ * Outlook compose window.
+ *
+ * Warning: setAsync replaces the ENTIRE compose body, including the user's
+ * Outlook signature. Users should include their signature in the template.
+ */
 async function loadBodyFromTemplate() {
   const name = document.getElementById("templateSelect").value;
   if (!name) { log("Select a template first.", "warning"); return; }
@@ -1696,13 +2213,15 @@ async function loadBodyFromTemplate() {
   const tpl = templates[name];
   if (!tpl || !tpl.body) { log(`Template "${name}" has no saved body.`, "warning"); return; }
 
-  // B2: On Mac, setAsync with HTML coercion can corrupt embedded image src attributes.
+  // Mac bug (B2): Office.js body.setAsync with HTML coercion can corrupt base64
+  // src attributes on <img> tags on Mac. Warn the user but proceed anyway —
+  // there's no workaround, and the text content will still be correct.
   const isMac = Office.context.platform === Office.PlatformType.Mac;
   if (isMac && tpl.body.match(/<img/i)) {
     log("Warning: Mac: loading a body template with embedded images may corrupt image links in the sent email (known Office.js limitation on Mac). Proceeding anyway.", "warning");
   }
 
-  // Signature preservation warning — loading a template replaces the entire compose body on all platforms
+  // Signature preservation warning — loading a template replaces the entire compose body on all platforms.
   log("ℹ Loading template will replace the current compose body (including your signature). Tip: place your signature at the bottom of the template to preserve it.", "info");
 
   try {
@@ -1713,6 +2232,16 @@ async function loadBodyFromTemplate() {
   }
 }
 
+/**
+ * getComposeBodyAsync() — Promise wrapper around Office.js body.getAsync.
+ *
+ * We request HTML coercion so we get the full rich-text HTML including
+ * inline styles, images, and Outlook-added wrapper elements. Wrapping
+ * the callback API in a Promise lets callers use async/await rather than
+ * nested callbacks.
+ *
+ * @returns {Promise<string>} Resolves with the compose body as HTML
+ */
 function getComposeBodyAsync() {
   return new Promise((resolve, reject) => {
     Office.context.mailbox.item.body.getAsync(
@@ -1725,6 +2254,16 @@ function getComposeBodyAsync() {
   });
 }
 
+/**
+ * setComposeBodyAsync(html) — Promise wrapper around Office.js body.setAsync.
+ *
+ * Sets the ENTIRE compose body (replacing any existing content) to the
+ * provided HTML. This is a destructive operation — the user's current
+ * compose content and signature are lost.
+ *
+ * @param {string} html - HTML string to set as the compose body
+ * @returns {Promise<void>}
+ */
 function setComposeBodyAsync(html) {
   return new Promise((resolve, reject) => {
     Office.context.mailbox.item.body.setAsync(
@@ -1738,9 +2277,25 @@ function setComposeBodyAsync(html) {
   });
 }
 
-/* ─── SAVE AS DRAFTS (Feature 5) ───────────────────────────────── */
+/* ─── SAVE AS DRAFTS ────────────────────────────────────────────────────────
+   Drafts mode runs the normal merge pipeline but saves each email as a draft
+   (POST /messages) instead of sending it (POST /sendMail). This is useful for
+   large campaigns that need a human review before delivery.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * handleSaveDrafts() — run the merge in drafts mode.
+ *
+ * Sets draftsMode = true so buildEmailRequest() uses the /messages endpoint,
+ * then delegates to handleMergeClick() for the full merge flow. Restores
+ * draftsMode = false and the CSV state in the finally block — always — so
+ * a mid-drafts error or cancellation doesn't leave the add-in stuck in
+ * drafts mode or with a blank CSV.
+ */
 async function handleSaveDrafts() {
+  // Snapshot CSV state before starting — handleMergeClick may clear the CSV
+  // on successful completion (zero failures). We need to restore it because
+  // creating drafts isn't the same as "sending" from the user's perspective.
   const savedCsvText = document.getElementById("csvInput").value;
   const savedRecipients = parsedRecipients.slice();
   draftsMode = true;
@@ -1748,7 +2303,9 @@ async function handleSaveDrafts() {
     await handleMergeClick();
   } finally {
     draftsMode = false;
-    // A8: Restore if handleMergeClick cleared it on zero-failure completion
+    // A8: If handleMergeClick cleared the CSV (its zero-failure cleanup), restore it.
+    // Drafts don't constitute a successful "send" — the user may want to send for real
+    // after reviewing the drafts.
     if (!document.getElementById("csvInput").value && savedCsvText) {
       document.getElementById("csvInput").value = savedCsvText;
       lsSet(LS_KEY_CSV, savedCsvText);
@@ -1757,11 +2314,31 @@ async function handleSaveDrafts() {
   }
 }
 
-/* ─── TEST SEND ────────────────────────────────────────────────── */
+/* ─── TEST SEND ─────────────────────────────────────────────────────────────
+   Sends a single personalised email to the sender themselves using data from
+   a selected recipient row. This lets users verify personalisation, formatting,
+   and attachments before committing to a full merge send.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * handleTestSend() — send a single test email to the logged-in user.
+ *
+ * Uses the data from the row selected in #testRowSelect (default: row 0) to
+ * personalise the subject and body. Sends to the sender's own email address.
+ * Applies all the same options as a real merge: custom headers, reply-to,
+ * send-as, attachments, inline images, receipts, flags — so the test is a
+ * faithful preview of what real recipients will receive.
+ *
+ * Subject is prefixed with "[TEST]" so the sender can easily identify test
+ * emails in their inbox.
+ */
 async function handleTestSend() {
-  // A1: Re-entrancy guard — disable button for the duration
+  // Re-entrancy guard: disable the button for the duration of the async operation.
+  // Without this, a slow network call could let the user click twice and send
+  // two test emails.
   document.getElementById("testSendBtn").disabled = true;
+  // Snapshot and clear _fillInValues — the test send shouldn't use fill-in
+  // values from a previous interactive fill-in session.
   const savedFillIn = window._fillInValues;
   window._fillInValues = null;
   try {
@@ -1772,16 +2349,23 @@ async function handleTestSend() {
     return;
   }
 
+  // Get the sender's own email from the Office.js user profile — this is the
+  // address the test email will be sent TO.
   const selfEmail = Office.context.mailbox.userProfile.emailAddress;
   if (!selfEmail) { log("Could not determine your email address.", "error"); return; }
 
-  // Feature 1: use selected row index
+  // Use the row index from the test-row selector dropdown.
+  // parseInt with radix 10 is defensive against "09" being parsed as octal.
+  // Math.min guards against an out-of-bounds index if the CSV shrank since the
+  // dropdown was populated.
   const rowIdx = parseInt(document.getElementById("testRowSelect")?.value || "0", 10);
   const sample = parsedRecipients[Math.min(rowIdx, parsedRecipients.length - 1)] || parsedRecipients[0];
   const displayRowNum = rowIdx + 1;
 
   log(`Test send: personalising with row ${displayRowNum} data and sending to ${selfEmail}...`, "info");
 
+  // Read the Outlook compose body as HTML — this is the template the user has
+  // typed (or loaded from a saved template) in the compose window.
   let emailBodyTemplate = "";
   try {
     emailBodyTemplate = await new Promise((resolve, reject) => {
@@ -1792,10 +2376,15 @@ async function handleTestSend() {
     });
   } catch (err) { log(`Body read error: ${err.message}`, "error"); return; }
 
+  // Inject smart tokens (record_num, record_count) into the sample row object
+  // so they resolve correctly during personalisation.
   const sampleWithMeta = Object.assign({}, sample, {
     record_num:   String(rowIdx + 1),
     record_count: String(parsedRecipients.length || 1)
   });
+  // personalize() second arg = htmlEscape flag:
+  //   false for subject (plain text — &amp; in subjects looks wrong)
+  //   true  for body (HTML — prevents XSS via malicious CSV data)
   const subject = personalize(subjectTemplate, sampleWithMeta, false);  // plain text — no HTML escaping
   const body    = personalize(emailBodyTemplate, sampleWithMeta, true); // HTML body — escape merge values
 
@@ -1890,10 +2479,22 @@ async function handleTestSend() {
   }
 }
 
-/* ─── PREVIEW ALL ──────────────────────────────────────────────── */
+/* ─── PREVIEW ALL ───────────────────────────────────────────────────────────
+   Lets the user step through every recipient's personalised subject and body
+   before sending. Uses the same personalisation pipeline as the real merge so
+   what they see is exactly what recipients will receive.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * handlePreviewAll() — open the preview modal and snapshot the body template.
+ *
+ * Reads the current compose body from Outlook (snapshot to previewBodyTemplate)
+ * so that edits made during a long preview session don't affect the displayed
+ * previews mid-way through. Uses the filtered/sorted recipient set so the
+ * preview matches what will actually be sent (respecting any active filters).
+ */
 async function handlePreviewAll() {
-  // A10: Use filtered/sorted set so preview matches what will actually be sent
+  // Use the filtered/sorted set so the preview matches what will actually be sent.
   const toPreview = getFilteredSortedRecipients();
   if (!toPreview.length) {
     log("No recipients to preview.", "warning");
@@ -1903,6 +2504,7 @@ async function handlePreviewAll() {
   const subjectTemplate = document.getElementById("subjectInput").value.trim();
   if (!subjectTemplate) { log("Subject line is empty.", "error"); return; }
 
+  // Warn if fill_in tokens are present — they won't resolve without running a merge first.
   const bodyHtmlForPreview = await getComposeBodyAsync().catch(function() { return ""; });
   if (!window._fillInValues && /\{\{fill_in:/i.test(bodyHtmlForPreview)) {
     log("Note: {{fill_in:…}} tokens found — run a merge first to populate fill-in values. Previewing with placeholder tokens.", "warning");
@@ -1910,6 +2512,8 @@ async function handlePreviewAll() {
 
   log("Reading email body for preview...", "info");
   try {
+    // Snapshot the body NOW so the preview is deterministic even if the user
+    // edits the compose window while stepping through previews.
     previewBodyTemplate = await new Promise((resolve, reject) => {
       Office.context.mailbox.item.body.getAsync(Office.CoercionType.Html, (result) => {
         if (result.status === Office.AsyncResultStatus.Succeeded) resolve(result.value);
@@ -1918,43 +2522,77 @@ async function handlePreviewAll() {
     });
   } catch (err) { log(`Body read error: ${err.message}`, "error"); return; }
 
-  previewRecipients = toPreview; // A10: store filtered set for navigation
-  previewIndex = 0;
+  previewRecipients = toPreview; // Store the filtered set for Prev/Next navigation
+  previewIndex = 0;              // Always start at the first recipient
   renderPreviewEntry();
-  _openModalWithTrap("previewModal"); // Feature 15: focus trap
+  // _openModalWithTrap sets focus to the first focusable element and traps
+  // keyboard focus inside the modal (accessibility requirement).
+  _openModalWithTrap("previewModal");
 }
 
+/**
+ * renderPreviewEntry() — personalise and display the current preview recipient.
+ *
+ * Called on modal open and after each Prev/Next button click.
+ * Uses previewBodyTemplate (snapshotted at modal-open time) rather than
+ * re-reading the compose body, which ensures consistency across navigation.
+ */
 function renderPreviewEntry() {
-  // A10: Use previewRecipients (filtered set) instead of parsedRecipients
   const total = previewRecipients.length;
   if (!total || previewIndex >= total) return;
+  // Inject record_num and record_count as if this were a real merge run.
   const recipient = Object.assign({}, previewRecipients[previewIndex], {
     record_num:   String(previewIndex + 1),
     record_count: String(total)
   });
   const subjectTemplate = document.getElementById("subjectInput").value;
 
+  // personalize() third argument: false = no HTML escaping (subject is plain text),
+  // true = HTML-escape merge values (body is rendered in an iframe).
   const subject  = personalize(subjectTemplate, recipient, false);
   const body     = personalize(previewBodyTemplate, recipient, true);
   const plainTextMode = document.getElementById("plainTextMode").checked;
+  // In plain-text mode, strip all HTML tags and show the result in a <pre> block
+  // so whitespace is preserved. escapeHtml prevents any remaining HTML entities
+  // from being interpreted by the browser.
   const displayBody   = plainTextMode
     ? `<pre style="white-space:pre-wrap;font-family:Segoe UI,sans-serif;font-size:13px;padding:8px;">${escapeHtml(stripHtmlToText(body))}</pre>`
     : body;
 
   document.getElementById("previewCounter").textContent = `Preview ${previewIndex + 1} / ${total}`;
   document.getElementById("previewSubject").textContent = subject;
+  // srcdoc renders the HTML in an isolated sandbox without a network request.
+  // Safer than innerHTML because the iframe has a different origin.
   document.getElementById("previewBodyFrame").srcdoc    = displayBody;
 
+  // Disable Prev/Next at the boundaries so the user can't navigate out of range.
   document.getElementById("previewPrevBtn").disabled = previewIndex === 0;
   document.getElementById("previewNextBtn").disabled = previewIndex === total - 1;
 }
 
+/**
+ * closePreviewModal() — close the preview modal and restore focus.
+ */
 function closePreviewModal() {
-  _closeModalWithTrap("previewModal"); // Feature 15
+  // _closeModalWithTrap restores focus to the element that had focus when the
+  // modal was opened (accessibility requirement).
+  _closeModalWithTrap("previewModal");
 }
 
-/* ─── DOWNLOAD LOG ─────────────────────────────────────────────── */
+/* ─── DOWNLOAD LOG ──────────────────────────────────────────────────────────
+   Exports the full text content of the status log panel to a .txt file.
+   Useful for support requests — users can attach the exported log to show
+   exactly what happened during a merge run.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * downloadLog() — export all log entries as a plain-text file.
+ *
+ * Collects the textContent of every .log-entry paragraph, joins with newlines,
+ * and triggers a browser download. Timestamp is embedded in the filename for
+ * uniqueness. Colons in the ISO timestamp are replaced with hyphens because
+ * colons are illegal in Windows filenames.
+ */
 function downloadLog() {
   const entries = document.querySelectorAll("#statusLog .log-entry");
   if (!entries.length) { log("Log is empty.", "info"); return; }
@@ -1963,18 +2601,32 @@ function downloadLog() {
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement("a");
   a.href     = url;
+  // Slice(0,19) gives "2024-01-15T14:30:00" — drop the sub-second and timezone parts.
   a.download = `mail-merge-log-${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.txt`;
+  // Must append to DOM before clicking — some browsers require the element to be in the document.
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  URL.revokeObjectURL(url); // Release the blob URL to free memory
   log("Log exported.", "info");
 }
 
-/* ─── SEND SUMMARY REPORT ──────────────────────────────────────── */
+/* ─── SEND SUMMARY REPORT ───────────────────────────────────────────────────
+   After a merge run, downloadSendReport() generates a CSV with one row per
+   send attempt (including retries) from the sendOutcomes array. The report is
+   useful for auditing: who was contacted, when, and whether it succeeded.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * downloadSendReport() — export the sendOutcomes array as a downloadable CSV.
+ *
+ * csvField() is applied to every cell to ensure any values containing commas,
+ * quotes, or newlines are properly quoted per RFC 4180. Without this, an error
+ * message containing a comma would break the CSV structure.
+ */
 function downloadSendReport() {
   if (!sendOutcomes.length) { log("No send outcomes to report.", "info"); return; }
+  // Build header row first, then one data row per outcome.
   const rows = [["row_num","email","display_name","subject_used","status","timestamp","error"]];
   sendOutcomes.forEach(o => rows.push([
     o.rowNum      || "",
@@ -1984,13 +2636,13 @@ function downloadSendReport() {
     o.status      || "",
     o.timestamp   || "",
     o.error       || ""
-  ].map(v => csvField(String(v)))));
+  ].map(v => csvField(String(v))))); // csvField wraps values in quotes if needed
   const csv  = rows.map(r => r.join(",")).join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement("a");
   a.href     = url;
-  a.download = `mail-merge-report-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = `mail-merge-report-${new Date().toISOString().slice(0, 10)}.csv`; // date-only suffix
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -1998,33 +2650,64 @@ function downloadSendReport() {
   log("Send report exported.", "info");
 }
 
-/* ─── PROGRESS BAR ─────────────────────────────────────────────── */
+/* ─── PROGRESS BAR ──────────────────────────────────────────────────────────
+   Three functions manage the progress bar: setProgress (live update during
+   send), hideProgress (reset after cancel), showMergeComplete (success state).
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * setProgress(current, total) — update the progress bar during a merge run.
+ *
+ * Also updates the ARIA aria-valuenow attribute so screen readers announce
+ * progress without the user needing to navigate to the progress bar element.
+ *
+ * @param {number} current - Number of emails sent so far
+ * @param {number} total   - Total number of emails to send
+ */
 function setProgress(current, total) {
+  // Guard against division by zero — happens if this is called before total is known.
   const pct = total > 0 ? Math.round((current / total) * 100) : 0;
   document.getElementById("progressContainer").classList.remove("hidden");
   const fill = document.getElementById("progressFill");
   fill.style.width = `${pct}%`;
-  fill.setAttribute("aria-valuenow", pct);
+  fill.setAttribute("aria-valuenow", pct); // ARIA live region for screen readers
   document.getElementById("progressLabel").textContent = `${pct}%  (${current} / ${total})`;
 }
 
+/**
+ * hideProgress() — reset and hide the progress bar.
+ *
+ * Called when a merge is cancelled or an error aborts the run.
+ * Does NOT call this on success — showMergeComplete() handles that path
+ * and auto-hides after 8 seconds.
+ */
 function hideProgress() {
   document.getElementById("progressContainer").classList.add("hidden");
   document.getElementById("progressFill").style.width = "0%";
 }
 
-/* Feature 5: show completion state and auto-hide after 8 seconds */
+/**
+ * showMergeComplete(sent, total) — show a "Done" completion state in the
+ * progress bar and auto-hide it after 8 seconds.
+ *
+ * Sets _mergeCompletedSuccessfully to true so the auto-hide timer doesn't
+ * conflict with a new merge that starts before the 8 s elapses.
+ *
+ * @param {number} sent  - Number of emails successfully sent
+ * @param {number} total - Total number attempted
+ */
 function showMergeComplete(sent, total) {
   _mergeCompletedSuccessfully = true;
   const fill  = document.getElementById("progressFill");
   const label = document.getElementById("progressLabel");
   const container = document.getElementById("progressContainer");
   if (container) container.classList.remove("hidden");
-  if (fill)  fill.style.width = "100%";
+  if (fill)  fill.style.width = "100%"; // Always show 100% on completion
   if (label) label.textContent = "✓ Done — " + sent + " of " + total + " sent";
+  // Auto-hide after 8 s. Guard with !mergeInProgress in case a new merge
+  // started while this timer was running — we don't want to hide a live bar.
   setTimeout(function() {
-    if (!mergeInProgress) {  // only hide if no merge is running
+    if (!mergeInProgress) {
       const c = document.getElementById("progressContainer");
       if (c) c.classList.add("hidden");
       _mergeCompletedSuccessfully = false;
@@ -2032,15 +2715,35 @@ function showMergeComplete(sent, total) {
   }, 8000);
 }
 
-/* ─── SUPPRESSION LIST ─────────────────────────────────────────── */
+/* ─── SUPPRESSION LIST ──────────────────────────────────────────────────────
+   The suppression list (also called opt-out or unsubscribe list) is a Set of
+   email addresses that should NEVER receive emails from this add-in. Recipients
+   whose (lowercased) address appears in suppressionSet are silently skipped
+   during the merge loop — they receive no email and no error is logged.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * handleSuppressionUpload(e) — parse a text file of suppressed email addresses
+ * and add them to suppressionSet.
+ *
+ * The file can be newline-separated, comma-separated, or semicolon-separated.
+ * We lowercase all addresses before adding them because suppressionSet lookups
+ * are case-insensitive — if we stored "Bob@EXAMPLE.COM" and the CSV has
+ * "bob@example.com", the lookup would miss without normalisation.
+ *
+ * Resets e.target.value after reading so the user can re-upload the same file.
+ *
+ * @param {Event} e - The "change" event from the file input
+ */
 function handleSuppressionUpload(e) {
   const file = e.target.files[0];
   if (!file) return;
-  e.target.value = "";
+  e.target.value = ""; // Allow re-selecting the same file later
   const reader = new FileReader();
   reader.onload = (event) => {
     const text   = event.target.result;
+    // Split on newlines, commas, semicolons, or carriage returns — handles
+    // most export formats from email marketing platforms.
     const emails = text.split(/[\n,;\r]+/)
       .map(s => s.trim().toLowerCase())
       .filter(s => EMAIL_REGEX.test(s));
@@ -2054,6 +2757,13 @@ function handleSuppressionUpload(e) {
   reader.readAsText(file);
 }
 
+/**
+ * clearSuppression() — empty suppressionSet and reset the UI.
+ *
+ * After clearing, all previously suppressed addresses will receive emails
+ * in the next merge run. This is intentional — the user explicitly clicked
+ * "Clear suppression list".
+ */
 function clearSuppression() {
   suppressionSet.clear();
   document.getElementById("suppressionLabel").textContent = "None loaded";
@@ -2061,19 +2771,40 @@ function clearSuppression() {
   log("Suppression list cleared.", "info");
 }
 
-/* ─── RETRY FAILED ─────────────────────────────────────────────── */
+/* ─── RETRY FAILED ──────────────────────────────────────────────────────────
+   After a merge run with partial failures, the "Retry failed" button calls
+   handleRetryFailed(). It temporarily swaps parsedRecipients with the failed
+   list and runs the full merge pipeline again. The finally block restores the
+   original list whether or not the retry succeeded.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * handleRetryFailed() — retry sending to all recipients that failed in the
+ * most recent merge run.
+ *
+ * The key pattern here is "swap, run, restore in finally":
+ *   1. Snapshot the current parsedRecipients and CSV text
+ *   2. Replace parsedRecipients with failedRecipients
+ *   3. Clear failedRecipients (so the retry itself can populate it again)
+ *   4. Run handleMergeClick() which reads parsedRecipients
+ *   5. In the finally block, restore parsedRecipients and the CSV textarea
+ *      unconditionally — even if the retry throws or is cancelled
+ *
+ * The CSV restoration in the finally block addresses a bug where handleMergeClick
+ * could clear the CSV textarea on zero-failure completion, leaving the user
+ * with a blank CSV after a successful retry.
+ */
 async function handleRetryFailed() {
   if (!failedRecipients.length) return;
-  // A7 + BUG 7: Save both recipients and CSV text — restore is now in a finally block
-  const savedRecipients = parsedRecipients.slice();
+  const savedRecipients = parsedRecipients.slice(); // shallow copy is sufficient
   const savedCsvText = document.getElementById("csvInput").value;
+  // Temporarily replace the working list with the failed subset
   parsedRecipients = failedRecipients.slice();
-  failedRecipients = [];
+  failedRecipients = []; // Clear so the retry can repopulate on new failures
   try {
     await handleMergeClick();
   } finally {
-    // Restore regardless of outcome (error or success)
+    // Always restore — regardless of success, error, or cancellation.
     parsedRecipients = savedRecipients;
     if (!document.getElementById("csvInput").value && savedCsvText) {
       document.getElementById("csvInput").value = savedCsvText;
@@ -2318,20 +3049,39 @@ function updateTagHint(targetIsSubject) {
     : "👆 Click any tag to insert it into your <strong>email body</strong>";
 }
 
-/* ─── FILE UPLOAD: CSV + EXCEL ─────────────────────────────────── */
+/* ─── FILE UPLOAD: CSV + EXCEL ──────────────────────────────────────────────
+   These functions handle the file-picker upload path. The drag-and-drop path
+   in Office.onReady() reuses handleCsvFileUpload() by injecting the dropped
+   file into csvFileInput and triggering a "change" event.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * handleCsvFileUpload(e) — dispatch a file to either the CSV or Excel loader
+ * based on its extension. Called by the csvFileInput "change" event.
+ *
+ * @param {Event} e - The file input "change" event
+ */
 function handleCsvFileUpload(e) {
   const file = e.target.files[0];
   if (!file) return;
-  e.target.value = "";
+  e.target.value = ""; // Reset input so the same file can be re-uploaded
   const ext = file.name.split(".").pop().toLowerCase();
   if (ext === "xlsx" || ext === "xls") {
-    loadExcelFile(file);
+    loadExcelFile(file); // Excel path — uses SheetJS to convert to CSV
   } else {
-    loadCsvFile(file);
+    loadCsvFile(file);   // Plain CSV or TSV path
   }
 }
 
+/**
+ * loadCsvFile(file) — read a plain-text CSV file into the csvInput textarea
+ * and trigger parseAndPreview().
+ *
+ * FileReader.readAsText() returns the file as a UTF-8 string. The browser
+ * handles BOM (byte-order mark) stripping automatically on most platforms.
+ *
+ * @param {File} file - The File object to read
+ */
 function loadCsvFile(file) {
   const reader = new FileReader();
   reader.onload = (event) => {
@@ -2343,6 +3093,20 @@ function loadCsvFile(file) {
   reader.readAsText(file);
 }
 
+/**
+ * loadExcelFile(file) — use the SheetJS (XLSX) library to convert an Excel
+ * workbook's first sheet to CSV, then load it exactly like a .csv file.
+ *
+ * We read the file as ArrayBuffer (not text) because the XLSX library needs
+ * the raw binary data to parse the workbook format. After conversion to CSV
+ * string, the rest of the pipeline (parseCSV, validation, etc.) is identical
+ * to the plain-text CSV path.
+ *
+ * The SheetJS CDN library is loaded in taskpane.html. If it failed to load
+ * (network error, CSP block), XLSX will be undefined — guard and warn.
+ *
+ * @param {File} file - The .xlsx or .xls File object to read
+ */
 function loadExcelFile(file) {
   if (typeof XLSX === "undefined") {
     log("Excel support unavailable — SheetJS failed to load. Try refreshing the task pane.", "error");
@@ -2351,8 +3115,10 @@ function loadExcelFile(file) {
   const reader = new FileReader();
   reader.onload = (event) => {
     try {
+      // Wrap the ArrayBuffer in Uint8Array — XLSX.read expects a typed array.
       const data      = new Uint8Array(event.target.result);
       const workbook  = XLSX.read(data, { type: "array" });
+      // Always use the first sheet — we don't support multi-sheet selection.
       const sheetName = workbook.SheetNames[0];
       const csv       = XLSX.utils.sheet_to_csv(workbook.Sheets[sheetName]);
       document.getElementById("csvInput").value = csv;
@@ -2363,22 +3129,38 @@ function loadExcelFile(file) {
     }
   };
   reader.onerror = () => log(`Failed to read file: ${file.name}`, "error");
-  reader.readAsArrayBuffer(file);
+  reader.readAsArrayBuffer(file); // Must be ArrayBuffer for SheetJS, not text
 }
 
-/* ─── ATTACHMENT UPLOAD: SHARED ────────────────────────────────── */
+/* ─── ATTACHMENT UPLOAD: SHARED ─────────────────────────────────────────────
+   Shared attachments are the same files attached to every email in the merge.
+   They're read as Data URLs (base64) via FileReader and stored in the
+   sharedAttachments array. Graph sendMail expects attachments as base64
+   contentBytes in the request body.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * handleAttachmentUpload(e) — read one or more shared attachment files and
+ * add them to the sharedAttachments array.
+ *
+ * The "pending" counter pattern: since FileReader.onload fires asynchronously
+ * for each file, we can't know when ALL files have loaded without tracking
+ * how many are still in-flight. We decrement pending on each completion (success
+ * or error) and call checkDone() which fires the final UI update only once.
+ *
+ * @param {Event} e - The "change" event from the shared attachment file input
+ */
 function handleAttachmentUpload(e) {
   const files = Array.from(e.target.files);
-  e.target.value = "";
+  e.target.value = ""; // Reset so the same file can be re-added
   if (!files.length) return;
 
-  let pending     = files.length;
+  let pending     = files.length; // tracks in-flight FileReader callbacks
   let loadedCount = 0;
 
   function checkDone() {
     pending--;
-    if (pending === 0) {
+    if (pending === 0) { // All files processed (success or error)
       updateSharedAttachmentsLabel();
       if (loadedCount > 0) {
         log(`Loaded ${loadedCount} shared attachment${loadedCount !== 1 ? "s" : ""}.`, "success");
@@ -2387,14 +3169,18 @@ function handleAttachmentUpload(e) {
   }
 
   files.forEach(file => {
+    // Enforce Graph's per-attachment size limit before reading.
     if (file.size > MAX_ATTACHMENT_BYTES) {
       log(`Shared attachment too large: ${file.name} ` +
           `(${(file.size / 1024 / 1024).toFixed(1)} MB). Max 3 MB — skipped.`, "error");
-      checkDone();
+      checkDone(); // Still must decrement pending even on skip
       return;
     }
     const reader = new FileReader();
     reader.onload = (event) => {
+      // readAsDataURL returns "data:image/png;base64,iVBORw0..."
+      // We need just the base64 part (after the comma) for Graph,
+      // and just the MIME type (between ":" and ";") for contentType.
       const [meta, contentBytes] = event.target.result.split(",");
       const contentType = meta.split(":")[1].split(";")[0];
       sharedAttachments.push({ name: file.name, contentType, contentBytes, sizeBytes: file.size });
@@ -2409,6 +3195,10 @@ function handleAttachmentUpload(e) {
   });
 }
 
+/**
+ * updateSharedAttachmentsLabel() — refresh the UI label showing how many
+ * shared attachments are loaded and their total size.
+ */
 function updateSharedAttachmentsLabel() {
   if (sharedAttachments.length === 0) {
     document.getElementById("attachmentLabel").textContent = "None";
@@ -2421,6 +3211,9 @@ function updateSharedAttachmentsLabel() {
   }
 }
 
+/**
+ * clearSharedAttachments() — empty the sharedAttachments array and reset the UI.
+ */
 function clearSharedAttachments() {
   sharedAttachments = [];
   document.getElementById("attachmentLabel").textContent = "None";
@@ -2428,8 +3221,23 @@ function clearSharedAttachments() {
   log("Shared attachments cleared.", "info");
 }
 
-/* ─── ATTACHMENT UPLOAD: PER-RECIPIENT ─────────────────────────── */
+/* ─── ATTACHMENT UPLOAD: PER-RECIPIENT ──────────────────────────────────────
+   Per-recipient attachments are matched to recipients by filename. The CSV
+   "attachment" column holds the filename; the uploaded files are stored in the
+   perRecipientFiles Map keyed by lowercased filename. At send time,
+   resolveAttachmentsForRecipient() looks up the filename from the row's
+   attachment column in this Map.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * handlePerRecipientFilesUpload(e) — read multiple files for per-recipient
+ * attachments and store them in perRecipientFiles Map (key = lowercased filename).
+ *
+ * Lowercasing the key ensures filename lookups are case-insensitive —
+ * the CSV might say "Invoice_A.pdf" while the file is "invoice_a.pdf".
+ *
+ * @param {Event} e - The "change" event from the per-recipient file input
+ */
 function handlePerRecipientFilesUpload(e) {
   const files = Array.from(e.target.files);
   e.target.value = "";
@@ -2462,6 +3270,7 @@ function handlePerRecipientFilesUpload(e) {
     reader.onload = (event) => {
       const [meta, contentBytes] = event.target.result.split(",");
       const contentType = meta.split(":")[1].split(";")[0];
+      // Key by lowercased filename — matching is case-insensitive at resolve time.
       perRecipientFiles.set(file.name.toLowerCase(), {
         name: file.name,
         contentType,
@@ -2479,6 +3288,9 @@ function handlePerRecipientFilesUpload(e) {
   });
 }
 
+/**
+ * clearPerRecipientFiles() — empty the perRecipientFiles Map and reset the UI.
+ */
 function clearPerRecipientFiles() {
   perRecipientFiles.clear();
   document.getElementById("perRecipientLabel").textContent = "None loaded";
@@ -2534,6 +3346,9 @@ function handleInlineImagesUpload(e) {
   });
 }
 
+/**
+ * clearInlineImages() — empty the inlineImages Map and reset the UI.
+ */
 function clearInlineImages() {
   inlineImages.clear();
   document.getElementById("inlineImagesLabel").textContent = "None loaded";
@@ -2541,27 +3356,74 @@ function clearInlineImages() {
   log("Inline images cleared.", "info");
 }
 
+/**
+ * resolveAttachmentsForRecipient(recipient) — determine which attachment files
+ * to include for a specific recipient.
+ *
+ * Logic:
+ *   1. If the recipient's "attachment" field is non-empty, look it up in
+ *      perRecipientFiles by lowercased filename.
+ *   2. If found, return just that one per-recipient file.
+ *   3. If not found (filename in CSV but no matching uploaded file), log a
+ *      warning ONCE per unique filename (warnedMissingAttachments deduplicates),
+ *      then fall back to the shared attachments.
+ *   4. If "attachment" is empty, return the shared attachments (sent to everyone).
+ *
+ * The fallback behaviour (missing per-recipient file → shared attachments) is
+ * intentional — better to send something than nothing. The warning ensures the
+ * user knows about the mismatch.
+ *
+ * @param {Object} recipient - A row object from parsedRecipients
+ * @returns {Array} Array of attachment objects { name, contentType, contentBytes, sizeBytes }
+ */
 function resolveAttachmentsForRecipient(recipient) {
   const filename = (recipient.attachment || "").trim();
   if (filename) {
+    // Look up by lowercased filename for case-insensitive matching.
     const perFile = perRecipientFiles.get(filename.toLowerCase());
-    if (perFile) return [perFile];
+    if (perFile) return [perFile]; // Found — return this recipient's specific file
+    // File named in CSV but not in the uploaded set — warn once per unique filename.
     const key = filename.toLowerCase();
     if (!warnedMissingAttachments.has(key)) {
-      warnedMissingAttachments.add(key);
+      warnedMissingAttachments.add(key); // Mark as warned so we don't repeat this
       log(`No loaded file matches "${filename}" — falling back to shared attachment(s) for rows that reference it.`, "warning");
     }
-    return [...sharedAttachments];
+    return [...sharedAttachments]; // Fallback: use shared attachments
   }
+  // No per-recipient attachment column value — use shared attachments only.
   return [...sharedAttachments];
 }
 
-/* ─── CSV PARSING (RFC 4180) ───────────────────────────────────── */
+/* ─── CSV PARSING (RFC 4180) ────────────────────────────────────────────────
+   A hand-rolled RFC 4180 parser rather than a split-based approach. Why?
+   Because split-based parsers can't handle the three hard cases:
+     1. Quoted fields containing commas: "Smith, John",alice@example.com
+     2. Quoted fields containing newlines (a single "cell" spanning two lines)
+     3. Escaped double-quotes inside a quoted field: "Say ""hello"""
+   All three are valid RFC 4180 and occur in real-world CSV exports from
+   Excel, Google Sheets, and CRM tools.
+   ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * parseCSV(raw) — RFC 4180-compliant CSV parser with auto-detected delimiter.
+ *
+ * Returns an object { headers, rows } where:
+ *   headers: string[] — the lowercased, trimmed column headers from row 1
+ *   rows: Object[]    — each row as { columnName: value, _csvRow: number,
+ *                        _originalIndex: number }
+ *
+ * Internal properties prefixed with "_" are excluded from field-mapping
+ * and merge token resolution so they don't accidentally appear in emails.
+ *
+ * @param {string} raw - The raw CSV text to parse
+ * @returns {{ headers: string[], rows: Object[] }}
+ */
 function parseCSV(raw) {
-  // RFC 4180-compliant parser that handles quoted fields with embedded newlines
-
-  // Auto-detect delimiter from first non-empty line
+  // ── Auto-detect delimiter ─────────────────────────────────────────────
+  // Count occurrences of each candidate delimiter in the first non-empty line.
+  // Whichever appears most is assumed to be the delimiter. Default is comma.
+  // This handles TSV files (tabs) and European locale CSV (semicolons) without
+  // requiring the user to specify the delimiter manually.
   let delimiter = ",";
   const firstLine = raw.split(/\r?\n/).find(function(l) { return l.trim().length > 0; }) || "";
   const tabCount   = (firstLine.match(/\t/g)  || []).length;
@@ -2571,6 +3433,10 @@ function parseCSV(raw) {
   else if (semiCount > commaCount) delimiter = ";";
   // else keep ","
 
+  // ── Character-by-character state machine ─────────────────────────────
+  // State variables: rawRows accumulates parsed rows, row is the current
+  // row's fields, field is the current field being built character by character,
+  // inQuotes tracks whether we're inside a double-quoted field.
   const rawRows = [];
   let row = [];
   let field = "";
@@ -2583,33 +3449,36 @@ function parseCSV(raw) {
     if (inQuotes) {
       if (ch === '"') {
         if (i + 1 < n && raw[i + 1] === '"') {
-          // Escaped quote
+          // RFC 4180 §2.7: two consecutive double-quotes inside a quoted field
+          // represent a single literal double-quote. Consume both.
           field += '"';
           i += 2;
         } else {
-          // End of quoted field
+          // Closing quote: exit quoted mode (the next char should be delimiter or newline).
           inQuotes = false;
           i++;
         }
       } else {
+        // Any character inside quotes is literal — including newlines (embedded newlines
+        // in quoted fields are valid RFC 4180 and must not end the row).
         field += ch;
         i++;
       }
     } else {
       if (ch === '"') {
-        inQuotes = true;
+        inQuotes = true; // Enter quoted field mode
         i++;
       } else if (ch === delimiter) {
-        row.push(field);
+        row.push(field); // End of field
         field = "";
         i++;
       } else if (ch === '\r') {
-        // Handle \r\n and bare \r
+        // Handle both \r\n (Windows) and bare \r (legacy Mac) line endings.
         row.push(field);
         field = "";
         rawRows.push(row);
         row = [];
-        if (i + 1 < n && raw[i + 1] === '\n') i++;
+        if (i + 1 < n && raw[i + 1] === '\n') i++; // Consume the \n in \r\n
         i++;
       } else if (ch === '\n') {
         row.push(field);
@@ -2623,57 +3492,102 @@ function parseCSV(raw) {
       }
     }
   }
-  // Final field/row
+  // Final field/row: the last row may not end with a newline.
   if (field || row.length > 0) {
     row.push(field);
     rawRows.push(row);
   }
-  // Remove trailing empty row
+  // Remove trailing empty row — many CSV exports end with a final newline which
+  // produces a spurious empty row. If every field in the last row is "", drop it.
   if (rawRows.length > 0 && rawRows[rawRows.length - 1].every(f => f === "")) {
     rawRows.pop();
   }
 
+  // Need at least a header row + one data row.
   if (rawRows.length < 2) return { headers: [], rows: [] };
 
+  // ── Build header and row objects ──────────────────────────────────────
+  // Lowercase headers so column name matching is case-insensitive.
+  // Trimming handles leading/trailing spaces from some CSV exports.
   const headers = rawRows[0].map(h => h.trim().toLowerCase());
   const rows    = [];
 
   for (let r = 1; r < rawRows.length; r++) {
     const cols = rawRows[r].map(c => c.trim());
-    // Skip rows that are entirely blank
+    // Skip entirely blank rows (e.g. blank lines in the middle of the file).
     if (cols.every(c => c === "")) continue;
-    // Pad short rows instead of silently dropping them (handles optional trailing columns)
+    // Pad short rows rather than dropping them — a row with fewer columns than
+    // headers just has empty values for the missing fields. This handles the
+    // common case where the last few optional columns are omitted.
     while (cols.length < headers.length) cols.push("");
     const rowObj = {};
     headers.forEach((h, idx) => { rowObj[h] = cols[idx] || ""; });
-    rowObj._csvRow = r + 1; // L8: +1 for header row, already 1-based from loop start r=1
-    rowObj._originalIndex = rows.length; // P4: stamp before push to avoid O(n) indexOf
+    // _csvRow: the 1-based line number in the original CSV (header = line 1, first
+    // data row = line 2). Stored for error messages — "row 5 has an invalid email".
+    rowObj._csvRow = r + 1; // +1 because r starts at 1 (skipping header), but header is line 1
+    // _originalIndex: position in the rows array BEFORE any filter/sort.
+    // Stamped here rather than computed with indexOf() later — O(1) vs O(n).
+    rowObj._originalIndex = rows.length;
     rows.push(rowObj);
   }
 
   return { headers, rows };
 }
 
-/* ─── FILTER / SORT STATE ──────────────────────────────────────── */
+/* ─── FILTER / SORT STATE ───────────────────────────────────────────────────
+   The filter/sort bar lets users narrow the recipient list before sending.
+   Filters are applied client-side on parsedRecipients using getFilteredSortedRecipients().
+   Multiple filter conditions can be combined with AND or OR logic.
+   ─────────────────────────────────────────────────────────────────────────── */
 
-let activeFilter = null; // { conditions, sortCol, sortDir, logic }
+// activeFilter: the currently applied filter/sort specification, or null if
+// no filter is active. Shape: { conditions, sortCol, sortDir, logic }
+// Used by getFilteredSortedRecipients() to produce the working set.
+let activeFilter = null;
+
+// filterConditionCount: monotonically increasing counter used to generate unique
+// IDs for condition rows. Never resets — ensures IDs stay unique even after rows
+// are removed and new ones added.
 let filterConditionCount = 0;
 
+/**
+ * populateFilterSortBar(headers) — populate the sort-column dropdown with the
+ * actual column names from the loaded CSV and make the filter bar visible.
+ *
+ * Called every time parseAndPreview() rebuilds the recipient table.
+ * Builds the options string in memory and assigns in one operation
+ * (avoiding repeated DOM reflows from innerHTML += in a loop).
+ *
+ * @param {string[]} headers - Column names from the parsed CSV
+ */
 function populateFilterSortBar(headers) {
   const sortCol = document.getElementById("sortCol");
-  // P2: build all options then assign once — avoids repeated innerHTML += reparse
+  // Build all options then assign once — avoids repeated innerHTML += reparse on each iteration.
   sortCol.innerHTML = '<option value="">Sort col…</option>' +
     headers.map(h => `<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`).join("");
   document.getElementById("filterSortBar").classList.remove("hidden");
-  // Start with one blank condition row visible
+  // Ensure at least one blank condition row is visible when the bar opens.
   if (document.getElementById("filterConditions").children.length === 0) {
     addFilterCondition();
   }
 }
 
+/**
+ * addFilterCondition(colVal, opVal, valVal) — append a new filter condition row
+ * to the #filterConditions container.
+ *
+ * Each row has a column selector, operator selector, value input, and a remove
+ * button. Pre-fills defaults when called from applyFilterSort() after restoring
+ * a previous filter state.
+ *
+ * @param {string} colVal - Column to pre-select (default: "")
+ * @param {string} opVal  - Operator to pre-select (default: "contains")
+ * @param {string} valVal - Value to pre-fill (default: "")
+ */
 function addFilterCondition(colVal = "", opVal = "contains", valVal = "") {
   filterConditionCount++;
-  const id = filterConditionCount;
+  const id = filterConditionCount; // Unique ID for this condition row's DOM element
+  // Build column options from current parsedRecipients keys, excluding internals.
   const headers = parsedRecipients.length > 0 ? Object.keys(parsedRecipients[0]).filter(k => !k.startsWith("_")) : [];
   const colOptions = headers.map(h =>
     `<option value="${escapeHtml(h)}" ${h === colVal ? "selected" : ""}>${escapeHtml(h)}</option>`
@@ -2700,6 +3614,7 @@ function addFilterCondition(colVal = "", opVal = "contains", valVal = "") {
            placeholder="value…" style="max-width:100px;" />
     <button class="btn-icon filter-remove-btn" data-cond-id="${id}" title="Remove">&#10005;</button>
   `;
+  // Remove button: remove this specific condition row from the DOM.
   div.querySelector(".filter-remove-btn").addEventListener("click", () => {
     const condRowEl = document.getElementById("filter-cond-" + id);
     if (condRowEl) condRowEl.remove();
@@ -2707,6 +3622,14 @@ function addFilterCondition(colVal = "", opVal = "contains", valVal = "") {
   document.getElementById("filterConditions").appendChild(div);
 }
 
+/**
+ * getFilterConditions() — read the current state of all filter condition rows
+ * and return them as an array of condition objects.
+ *
+ * Filters out rows with no column selected (blank col) — they're ignored.
+ *
+ * @returns {Array<{col: string, op: string, val: string}>}
+ */
 function getFilterConditions() {
   const rows = document.querySelectorAll("#filterConditions > div");
   return [...rows].map(row => ({
@@ -2716,11 +3639,23 @@ function getFilterConditions() {
   })).filter(c => c.col); // ignore rows with no column selected
 }
 
+/**
+ * applyCondition(row, cond) — test a single recipient row against a single
+ * filter condition. Returns true if the row passes (should be included).
+ *
+ * Numeric comparisons (gt/lt) use parseFloat so "100" > "9" works correctly
+ * as a number. String comparisons (contains/eq) are case-insensitive.
+ *
+ * @param {Object} row  - A recipient row object from parsedRecipients
+ * @param {Object} cond - A filter condition { col, op, val }
+ * @returns {boolean}
+ */
 function applyCondition(row, cond) {
   const cellVal = String(row[cond.col] !== null && row[cond.col] !== undefined ? row[cond.col] : "").trim();
   const testVal = cond.val.trim();
   const numCell = parseFloat(cellVal);
   const numTest = parseFloat(testVal);
+  // bothNum: true when both values are numeric — enables numeric comparison.
   const bothNum = !isNaN(numCell) && !isNaN(numTest);
   switch (cond.op) {
     case "contains":     return cellVal.toLowerCase().includes(testVal.toLowerCase());
@@ -2735,11 +3670,26 @@ function applyCondition(row, cond) {
   }
 }
 
+/**
+ * getFilteredSortedRecipients() — return the subset of parsedRecipients that
+ * passes the current row selection and activeFilter criteria, in sort order.
+ *
+ * This is the single source of truth for "what will actually be sent" — the
+ * merge loop, preview-all, and simulate all call this function to get their
+ * working set. Modifying activeFilter or selectedRowIndices and calling this
+ * again immediately reflects the new state.
+ *
+ * @returns {Object[]} Filtered and sorted copy of parsedRecipients
+ */
 function getFilteredSortedRecipients() {
+  // Shallow copy so we can filter/sort without mutating parsedRecipients.
   let result = parsedRecipients.slice();
 
-  // Row selection
+  // Apply row checkbox selection first — this is the most restrictive filter
+  // (selectedRowIndices = null means "all", a Set means "only these indices").
   if (selectedRowIndices !== null) {
+    // Filter by the original index (assigned at parse time as _originalIndex),
+    // not the current array index, so filtering survives sort order changes.
     result = result.filter((_, i) => selectedRowIndices.has(i));
   }
 
@@ -2747,31 +3697,47 @@ function getFilteredSortedRecipients() {
     const { conditions = [], sortCol, sortDir, logic = "AND" } = activeFilter;
     if (conditions.length) {
       result = result.filter(row => {
+        // AND logic: every condition must pass.
+        // OR logic: at least one condition must pass.
         if (logic === "OR") return conditions.some(c => applyCondition(row, c));
         return conditions.every(c => applyCondition(row, c));
       });
     }
     if (sortCol) {
+      // Case-insensitive string sort. Null-safe with the ternary fallback to "".
       result.sort((a, b) => {
         const av = String(a[sortCol] !== null && a[sortCol] !== undefined ? a[sortCol] : "").toLowerCase();
         const bv = String(b[sortCol] !== null && b[sortCol] !== undefined ? b[sortCol] : "").toLowerCase();
         const cmp = av < bv ? -1 : av > bv ? 1 : 0;
-        return sortDir === "desc" ? -cmp : cmp;
+        return sortDir === "desc" ? -cmp : cmp; // Negate for descending
       });
     }
   }
   return result;
 }
 
+/**
+ * applyFilterSort() — read the current filter conditions and sort settings from
+ * the UI, store them in activeFilter, and re-render the preview table.
+ */
 function applyFilterSort() {
   const conditions = getFilterConditions();
   const sortCol = document.getElementById("sortCol").value;
   const sortDir = document.getElementById("sortDir").value;
   const logic   = document.getElementById("filterLogic").value; // "AND" | "OR"
+  // If no conditions and no sort, clear the filter entirely rather than storing
+  // an empty filter object (getFilteredSortedRecipients() checks for null).
   activeFilter  = (conditions.length || sortCol) ? { conditions, sortCol, sortDir, logic } : null;
   renderFilteredPreview();
 }
 
+/**
+ * clearFilterSort() — reset all filter/sort state and re-render.
+ *
+ * Clears both the in-memory activeFilter and all the UI controls so the user
+ * starts fresh. Resets filterConditionCount so new condition IDs don't clash
+ * with stale DOM elements.
+ */
 function clearFilterSort() {
   activeFilter = null;
   document.getElementById("filterConditions").innerHTML = "";
@@ -2783,6 +3749,11 @@ function clearFilterSort() {
   renderFilteredPreview();
 }
 
+/**
+ * renderFilteredPreview() — apply the current filter and re-render the preview table.
+ *
+ * Also updates the #filterCountLabel to show how many rows pass the current filter.
+ */
 function renderFilteredPreview() {
   const rows = getFilteredSortedRecipients();
   document.getElementById("filterCountLabel").textContent =
@@ -2790,69 +3761,100 @@ function renderFilteredPreview() {
   renderPreviewTable(rows);
 }
 
+/**
+ * parseAndPreview() — parse the CSV textarea, validate it, and rebuild all
+ * dependent UI elements.
+ *
+ * This is the central "reload" function that runs whenever the recipient list
+ * changes: on file upload, on paste, on quick-mode input, on Match Fields apply,
+ * and on session restore. It orchestrates:
+ *   1. Parse the raw CSV text via parseCSV()
+ *   2. Check for an email column (or prompt Match Fields if missing)
+ *   3. Apply the field mapping via applyFieldMapping()
+ *   4. Enforce the MAX_RECIPIENTS cap
+ *   5. Reset all stateful UI (filter, selection, retry button, tag chips)
+ *   6. Rebuild the tag bar, test-row selector, and preview table
+ *   7. Warn about duplicate email addresses
+ */
 function parseAndPreview() {
   const raw = document.getElementById("csvInput").value;
   const { headers, rows } = parseCSV(raw);
 
-  // Apply field mapping to determine the effective email column
+  // Determine whether the CSV has an email column, accounting for the
+  // field mapping (which may remap a differently-named column to "email").
   const emailColMapped = fieldMapping.email || null;
   const hasEmailHeader = headers.includes("email") || (emailColMapped && headers.includes(emailColMapped));
 
   if (!hasEmailHeader) {
-    // Show map fields button and auto-open modal
+    // No email column found — show the Match Fields modal so the user can
+    // map one of their existing columns to the "email" canonical field.
     document.getElementById("mapFieldsBtn").style.display = "";
     if (!fieldMapping.email) {
+      // No mapping at all — auto-open the modal as a guided on-boarding step.
       log("No 'email' column detected — opening Match Fields to map columns.", "warning");
       showToast("No 'email' column found. Use Match Fields to map your email column.", "warning");
       openMatchFieldsModal(headers);
     } else {
+      // A mapping was set but the mapped column isn't in this CSV — user error.
       log("CSV must contain an 'email' column (or map a column to email).", "error");
       showToast("Your CSV needs an 'email' column, or use Match Fields to map one.", "error");
     }
     return;
   }
 
-  // Apply field mapping to all rows
+  // Apply field mapping: remap user's column names to canonical names.
   const mappedRows = rows.map(row => applyFieldMapping(row));
 
+  // Enforce the per-day recipient cap. Microsoft 365 limits outbound mail to
+  // 10,000 recipients per 24 hours per account. Exceeding it results in the
+  // account being temporarily blocked from sending — a serious operational risk.
   if (mappedRows.length > MAX_RECIPIENTS) {
     log(`🛑 CSV contains ${mappedRows.length.toLocaleString()} rows — exceeds the Microsoft 365 hard limit of ` +
         `10,000 outbound recipients per 24 hours. Trim your list before sending.`, "error");
     document.getElementById("recipientCount").textContent =
       `${mappedRows.length.toLocaleString()} recipients — OVER LIMIT`;
-    parsedRecipients = [];   // clear so old list cannot be sent accidentally
+    parsedRecipients = [];   // Clear so the old (possibly smaller) list can't be sent accidentally
     return;
   }
 
+  // ── Commit the new recipient list ──────────────────────────────────────
   parsedRecipients = mappedRows;
-  sendOutcomes = [];   // BUG 14: reset outcomes on new CSV load so they accumulate across retries
-  activeFilter = null; // reset filter on fresh parse
-  previewTablePage = 0; // Feature 6: reset paging on new CSV load
-  // A9: Clear stale condition rows DOM and counter so old rows don't persist across CSV reloads
+  // Reset sendOutcomes so they don't accumulate across unrelated CSV loads.
+  sendOutcomes = [];
+  // Clear the active filter — it may reference column names from the old CSV.
+  activeFilter = null;
+  // Reset to page 0 so the preview table starts at the beginning.
+  previewTablePage = 0;
+  // Clear stale condition rows from the previous CSV — column names have changed.
   document.getElementById("filterConditions").innerHTML = "";
   filterConditionCount = 0;
-  selectedRowIndices = null; // reset row selection on fresh parse
-  // Bug 4: clear failed recipients list and hide retry button on new CSV load
+  // Reset row selection — the previous selection's indices are meaningless with a new CSV.
+  selectedRowIndices = null;
+  // Clear the failed list and hide the retry button — they reference old rows.
   failedRecipients = [];
   const _parseRetryBtn = document.getElementById("retryFailedBtn");
   if (_parseRetryBtn) { _parseRetryBtn.classList.add("hidden"); _parseRetryBtn.textContent = ""; }
 
-  // Feature 13: hide getting-started banner once CSV is loaded
+  // Hide the getting-started banner once the user has loaded a real CSV.
   const bannerEl = document.getElementById("gettingStartedBanner");
   if (bannerEl) bannerEl.classList.add("hidden");
 
-  // Feature 1: rebuild test-row selector
+  // Rebuild the test-row selector with the new recipient list.
+  // Truncate labels to 28 chars to keep the dropdown manageable.
+  // escapeHtml() on CSV data prevents XSS via malicious column values.
   const testRowSel = document.getElementById("testRowSelect");
   if (testRowSel) {
     testRowSel.innerHTML = mappedRows.map(function(r, i) {
-      const label = escapeHtml((r.email || r.first_name || "").slice(0, 28)); // S2: escape CSV data
+      const label = escapeHtml((r.email || r.first_name || "").slice(0, 28));
       return '<option value="' + i + '">Row ' + (i + 1) + ': ' + label + '</option>';
     }).join("");
   }
 
-  // Show map fields button now that we have headers
+  // Reveal the "Match Fields" button now that we have actual column headers.
   document.getElementById("mapFieldsBtn").style.display = "";
 
+  // Warn about duplicate email addresses (send to same person twice).
+  // This is advisory — duplicates can be removed with the dedup option.
   const emailCounts = {};
   mappedRows.forEach(r => {
     const e = (r.email || "").toLowerCase();
@@ -2865,15 +3867,15 @@ function parseAndPreview() {
         `${dupeList}. Enable "Remove duplicates" in send options or edit the file.`, "warning");
   }
 
-  // Clear tags from any previous CSV before adding the new file's columns
+  // Rebuild tag chips — remove old CSV column chips and add the new file's columns.
   clearCsvTags();
-
   headers.forEach(h => {
     const tag = `{{${h}}}`;
+    // Don't add a chip for columns already covered by DEFAULT_TAGS (e.g. "email", "first_name").
     if (!DEFAULT_TAGS.includes(tag)) addTagToBar(tag, undefined, false);
   });
-
-  // Feature 4: always expose merge_table and unsubscribe_link as smart tags
+  // Always ensure merge_table and unsubscribe_link are available as smart chips,
+  // even if those aren't actual CSV column names.
   addTagToBar("{{merge_table}}", "smart");
   addTagToBar("{{unsubscribe_link}}", "smart");
 
@@ -2882,10 +3884,30 @@ function parseAndPreview() {
 
   populateFilterSortBar(Object.keys(mappedRows[0] || {}).filter(k => !k.startsWith("_")));
   renderPreviewTable(parsedRecipients);
-  populateInsertFieldSelect(headers);
+  populateInsertFieldSelect(headers); // Refresh the "Insert field" dropdown in the compose toolbar
   log(`Parsed ${mappedRows.length} recipients. Showing preview.`, "success");
 }
 
+/**
+ * renderPreviewTable(rows) — render the recipient preview table with paging
+ * and row-selection checkboxes.
+ *
+ * Builds the entire table as an HTML string and assigns it in one innerHTML
+ * operation — much faster than appending DOM nodes one by one, especially for
+ * large recipient lists. We escapeHtml() every cell value to prevent XSS via
+ * malicious CSV data appearing in the table.
+ *
+ * Paging: PREVIEW_PAGE_SIZE rows per page. The current page number is stored
+ * in the module-level previewTablePage variable so it persists across re-renders
+ * (e.g. when a filter is applied without changing the page).
+ *
+ * Row selection: each row has a checkbox with data-idx = the row's _originalIndex.
+ * The "select all" header checkbox and individual row checkboxes both update
+ * selectedRowIndices. selectedRowIndices === null means "all selected" (the fast
+ * path — no Set membership checks needed in the merge loop).
+ *
+ * @param {Object[]} rows - The rows to render (may be a filtered subset of parsedRecipients)
+ */
 function renderPreviewTable(rows) {
   const container = document.getElementById("previewTable");
   container.classList.remove("hidden");
@@ -2895,22 +3917,27 @@ function renderPreviewTable(rows) {
     return;
   }
 
-  // Feature 6: paging
+  // Clamp previewTablePage to a valid index after filtering may have shrunk the set.
   const totalPages = Math.ceil(rows.length / PREVIEW_PAGE_SIZE);
   previewTablePage = Math.min(previewTablePage, Math.max(0, totalPages - 1));
   const pageRows = rows.slice(previewTablePage * PREVIEW_PAGE_SIZE, (previewTablePage + 1) * PREVIEW_PAGE_SIZE);
 
+  // Filter out internal "_"-prefixed keys so they don't appear as table columns.
   const headers = Object.keys(rows[0]).filter(h => !h.startsWith("_"));
   let html = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
     '<label class="label" style="margin:0;">Preview (rows ' + (previewTablePage * PREVIEW_PAGE_SIZE + 1) + '–' + Math.min((previewTablePage + 1) * PREVIEW_PAGE_SIZE, rows.length) + ' of ' + rows.length + ')</label>' +
     '<button class="btn-secondary btn-edit-table" id="openEditTableBtn">✏ Edit table</button>' +
     '</div>';
   html += '<table class="preview-table"><thead><tr>';
+  // "Select all" header checkbox — toggles all visible row checkboxes.
   html += '<th><input type="checkbox" id="selectAllRowsChk" checked title="Select/deselect all" /></th>';
   headers.forEach(h => { html += '<th>' + escapeHtml(h) + '</th>'; });
   html += '</tr></thead><tbody>';
   pageRows.forEach(function(row) {
-    const originalIdx = row._originalIndex !== undefined ? row._originalIndex : parsedRecipients.indexOf(row); // P4
+    // Use _originalIndex (set at parse time) rather than the current iteration
+    // index — the current index changes with filtering/sorting, but _originalIndex
+    // always refers to the same row in parsedRecipients.
+    const originalIdx = row._originalIndex !== undefined ? row._originalIndex : parsedRecipients.indexOf(row);
     const isChecked = (selectedRowIndices === null || selectedRowIndices.has(originalIdx)) ? "checked" : "";
     html += '<tr>';
     html += '<td><input type="checkbox" class="row-select-chk" data-idx="' + originalIdx + '" ' + isChecked + ' /></td>';
@@ -2919,7 +3946,7 @@ function renderPreviewTable(rows) {
   });
   html += '</tbody></table>';
 
-  // Paging controls
+  // Paging controls — only shown when there's more than one page.
   if (totalPages > 1) {
     html += '<div class="preview-paging">' +
       '<button id="prevPageBtn" class="btn-sm"' + (previewTablePage === 0 ? ' disabled' : '') + '>‹ Prev</button>' +
@@ -2928,15 +3955,16 @@ function renderPreviewTable(rows) {
       '</div>';
   }
 
+  // Single innerHTML assignment — avoids repeated DOM mutations and reflows.
   container.innerHTML = html;
 
-  // Wire paging buttons
+  // ── Wire paging buttons ────────────────────────────────────────────────
   var prevBtn = document.getElementById("prevPageBtn");
   var nextBtn = document.getElementById("nextPageBtn");
   if (prevBtn) {
     prevBtn.addEventListener("click", function() {
       previewTablePage = Math.max(0, previewTablePage - 1);
-      renderPreviewTable(rows);
+      renderPreviewTable(rows); // Re-render the same rows array, new page
     });
   }
   if (nextBtn) {
@@ -2946,46 +3974,49 @@ function renderPreviewTable(rows) {
     });
   }
 
-  // Wire "Edit table" button — opens the in-memory edit modal
+  // ── Wire "Edit table" button ───────────────────────────────────────────
   const openEditBtn = document.getElementById("openEditTableBtn");
   if (openEditBtn) openEditBtn.addEventListener("click", openEditTableModal);
 
-  // Wire up header checkbox
+  // ── Wire "Select all" header checkbox ─────────────────────────────────
   document.getElementById("selectAllRowsChk").addEventListener("change", function(e) {
     if (e.target.checked) {
-      // Select all — null means "all included"
+      // null = "all rows selected" (the default state, most efficient).
       selectedRowIndices = null;
       document.querySelectorAll(".row-select-chk").forEach(function(chk) { chk.checked = true; });
     } else {
-      // Deselect all — empty Set means "none included"
+      // empty Set = "no rows selected".
       selectedRowIndices = new Set();
       document.querySelectorAll(".row-select-chk").forEach(function(chk) { chk.checked = false; });
     }
     updateSelectionCount();
   });
 
-  // Wire up row checkboxes
+  // ── Wire individual row checkboxes ────────────────────────────────────
   document.querySelectorAll(".row-select-chk").forEach(function(chk) {
     chk.addEventListener("change", function() {
       const idx = parseInt(chk.dataset.idx, 10);
       if (chk.checked) {
         if (selectedRowIndices !== null) {
           selectedRowIndices.add(idx);
-          // If now all are selected, reset to null
+          // Optimisation: if now all rows are selected, revert to null
+          // (the "all selected" sentinel) to avoid Set membership checks in the loop.
           if (selectedRowIndices.size === parsedRecipients.length) {
             selectedRowIndices = null;
           }
         }
-        // If null, already all selected — nothing to do
+        // If already null (all selected), checking a box is a no-op.
       } else {
         if (selectedRowIndices === null) {
-          // Was all-selected; build full Set and remove this one
+          // Was "all selected" — can't just delete from null.
+          // Build a full Set with every index, then remove this one.
           selectedRowIndices = new Set(parsedRecipients.map(function(_, i) { return i; }));
           selectedRowIndices.delete(idx);
         } else {
           selectedRowIndices.delete(idx);
         }
       }
+      // Keep the "select all" header checkbox in sync with row state.
       const allChks = document.querySelectorAll(".row-select-chk");
       const allChecked = [...allChks].every(function(c) { return c.checked; });
       const selectAllChk = document.getElementById("selectAllRowsChk");
@@ -2995,8 +4026,16 @@ function renderPreviewTable(rows) {
   });
 }
 
+/**
+ * updateSelectionCount() — update the #recipientCount label to reflect the
+ * current row-selection state.
+ *
+ * Shows "N recipients" when all are selected, "M of N selected" when a subset
+ * is selected. Called after every checkbox change.
+ */
 function updateSelectionCount() {
   const total = parsedRecipients.length;
+  // selectedRowIndices === null means all selected — no need to count a Set.
   const selected = selectedRowIndices === null ? total : selectedRowIndices.size;
   const countEl = document.getElementById("recipientCount");
   if (countEl) {
@@ -3085,26 +4124,51 @@ function processConditionals(template, recipient) {
 
 /* ─── MERGE FIELD FILTERS ──────────────────────────────────────── */
 
+/**
+ * applyFilter(value, filter) — apply a named transformation to a resolved token value.
+ *
+ * Called by personalize() for tokens written as {{field|filter}}, e.g. {{first_name|upper}}.
+ * Built-in filter names:
+ *   upper    — ALL CAPS
+ *   lower    — all lowercase
+ *   title    — Title Case (capitalises the first letter of every word)
+ *   trim     — strip leading/trailing whitespace
+ *   currency — format as USD currency string using the user's locale (e.g. $1,234.56)
+ *   number   — format as a locale number string with thousand separators (e.g. 1,234)
+ *   date     — parse value as a date and reformat as long-form (e.g. January 1, 2026)
+ *
+ * Fallback behaviour: if the filter name doesn't match any of the above AND the value
+ * is empty/whitespace, the filter string itself becomes the fallback value. This lets
+ * you write {{nickname|Friend}} to output "Friend" when the nickname column is blank.
+ * If the value is non-empty, the unknown filter is silently ignored and value is returned.
+ *
+ * @param {string} value  - the resolved (and already HTML-escaped, if needed) token value
+ * @param {string|null} filter - the filter name from the pipe, or null if no pipe was used
+ * @returns {string} the transformed value
+ */
 function applyFilter(value, filter) {
-  if (!filter) return value;
+  if (!filter) return value; // No pipe → return value unchanged
   const f = filter.trim().toLowerCase();
   if (f === "upper")    return value.toUpperCase();
   if (f === "lower")    return value.toLowerCase();
-  if (f === "title")    return value.replace(/\b\w/g, c => c.toUpperCase());
+  if (f === "title")    return value.replace(/\b\w/g, c => c.toUpperCase()); // \b\w = first char of each word
   if (f === "trim")     return value.trim();
   if (f === "currency") {
     const n = parseFloat(value);
+    // parseFloat returns NaN for non-numeric strings — fall back to the raw value if it's not a number
     return isNaN(n) ? value : n.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2 });
   }
   if (f === "number") {
     const n = parseFloat(value);
-    return isNaN(n) ? value : n.toLocaleString();
+    return isNaN(n) ? value : n.toLocaleString(); // toLocaleString adds thousand separators in the user's locale
   }
   if (f === "date") {
     const d = new Date(value);
+    // new Date("invalid") produces an invalid date — getTime() returns NaN, so we can detect it
     return isNaN(d.getTime()) ? value : d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
   }
-  // Unknown filter name = treat as fallback value for empty fields
+  // Unknown filter name = treat as fallback value for empty fields.
+  // Allows {{field|Default Text}} to output "Default Text" when the field is blank.
   return value.trim() ? value : filter;
 }
 
@@ -3179,9 +4243,19 @@ function personalize(template, recipient, escapeValues = true) {
   return result;
 }
 
+/**
+ * findUnresolvedTokens(text) — scan text for any {{...}} placeholders that were NOT replaced.
+ *
+ * Called after personalize() to detect tokens that had no matching CSV column — these would
+ * appear literally in the sent email, which is almost always a user error. The Set deduplicates
+ * so each unique unresolved token only appears once in the warning log.
+ *
+ * @param {string} text - the personalized subject or body after all replacements have been applied
+ * @returns {string[]} deduplicated array of unresolved token strings, e.g. ["{{middle_name}}"]
+ */
 function findUnresolvedTokens(text) {
-  const matches = text.match(/\{\{[^}]+\}\}/g);
-  return matches ? [...new Set(matches)] : [];
+  const matches = text.match(/\{\{[^}]+\}\}/g); // find all remaining {{...}} patterns
+  return matches ? [...new Set(matches)] : [];    // deduplicate with Set, then spread back to array
 }
 
 /**
@@ -3214,31 +4288,66 @@ function escapeHtml(str) {
     .replace(/'/g, "&#039;"); // Prevents breaking out of single-quoted HTML attributes
 }
 
+/**
+ * stripHtmlToText(html) — convert an HTML email body to plain text.
+ *
+ * Used when plainTextMode is enabled: the user writes their email in HTML compose
+ * (so they get formatting tools), but the personalised body is then stripped to plain
+ * text before being sent via Graph. This is necessary because Graph's "Text" contentType
+ * sends raw text — if you sent the HTML markup literally it would appear as raw tags in
+ * the recipient's inbox.
+ *
+ * The replacements are ordered so that:
+ *   1. Block-level elements (<br>, </p>, </div>, </li>) are converted to newlines BEFORE
+ *      all tags are stripped — otherwise we'd lose all line breaks entirely.
+ *   2. All remaining HTML tags are stripped with a generic <[^>]+> pattern.
+ *   3. HTML entities are decoded back to their plain-text characters.
+ *   4. Runs of 3+ consecutive newlines are collapsed to 2 (a paragraph break) to avoid
+ *      excessive blank lines in the output.
+ *
+ * @param {string} html - the HTML body string from getComposeBodyAsync
+ * @returns {string} plain-text equivalent, suitable for Graph's Text contentType
+ */
 function stripHtmlToText(html) {
   return html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n\n")
-    .replace(/<\/div>/gi, "\n")
-    .replace(/<\/li>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
+    .replace(/<br\s*\/?>/gi, "\n")      // <br> / <br /> → newline
+    .replace(/<\/p>/gi, "\n\n")         // closing </p> → paragraph break
+    .replace(/<\/div>/gi, "\n")         // closing </div> → newline
+    .replace(/<\/li>/gi, "\n")          // closing </li> → newline
+    .replace(/<[^>]+>/g, "")            // strip all remaining HTML tags
+    .replace(/&amp;/g, "&")             // decode HTML entities
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#039;/g, "'")
-    .replace(/&nbsp;/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+    .replace(/&nbsp;/g, " ")            // non-breaking space → regular space
+    .replace(/\n{3,}/g, "\n\n")         // collapse 3+ blank lines into at most 2
+    .trim();                             // remove leading/trailing whitespace from the whole string
 }
 
 /* ─── ADDRESS LIST PARSER ──────────────────────────────────────── */
 
+/**
+ * parseAddressList(raw) — parse a semicolon/comma/space-separated email address string
+ * into the Graph API emailAddress object format.
+ *
+ * Used in two places:
+ *   1. CC/BCC fields from the CSV — each row can have "cc" or "bcc" columns with
+ *      multiple addresses separated by any combination of semicolons, commas, or spaces.
+ *   2. Suppression/opt-out matching — to extract individual addresses from a multi-TO row.
+ *
+ * Returns Graph-compatible objects: [{ emailAddress: { address: "foo@bar.com" } }, ...]
+ * Only addresses that pass EMAIL_REGEX are included — malformed strings are silently dropped.
+ *
+ * @param {string} raw - raw address string from a CSV cell or input field
+ * @returns {{ emailAddress: { address: string } }[]}
+ */
 function parseAddressList(raw) {
   if (!raw || !raw.trim()) return [];
-  return raw.split(/[;,\s]+/)
+  return raw.split(/[;,\s]+/)          // split on any mix of semicolons, commas, or whitespace
     .map(a => a.trim())
-    .filter(a => a.length > 0 && EMAIL_REGEX.test(a))
-    .map(address => ({ emailAddress: { address } }));
+    .filter(a => a.length > 0 && EMAIL_REGEX.test(a)) // keep only syntactically valid addresses
+    .map(address => ({ emailAddress: { address } }));  // wrap in Graph object format
 }
 
 /**
@@ -3655,6 +4764,22 @@ function getTokenViaDialog() {
 
 /* ─── PRE-FLIGHT CHECKS ────────────────────────────────────────── */
 
+/**
+ * checkPayloadSize(bodyTemplate) — warn the user if the email body is approaching the
+ * Microsoft Graph API's 4 MB per-message size limit.
+ *
+ * The Graph /me/sendMail endpoint hard-rejects requests larger than 4 MB. Inline images
+ * (embedded as base64 in the HTML body) are the most common cause — a single high-res
+ * screenshot can push a template over the limit. This check runs on the template before
+ * personalization, so the actual per-recipient payload may be slightly larger after
+ * tokens are replaced, but it's a useful early warning.
+ *
+ * TextEncoder().encode() gives the exact UTF-8 byte count, which is what the network
+ * transmits. Using .length on a JS string would give the character count, which
+ * under-counts multi-byte Unicode characters.
+ *
+ * @param {string} bodyTemplate - the raw HTML body from the compose window
+ */
 function checkPayloadSize(bodyTemplate) {
   const bytes = new TextEncoder().encode(bodyTemplate).length;
   if (bytes > MAX_PAYLOAD_BYTES) {
@@ -3665,14 +4790,33 @@ function checkPayloadSize(bodyTemplate) {
 
 /* ─── SENDING WINDOW (Feature 2) ──────────────────────────────── */
 
+/**
+ * msUntilWindowOpens() — returns the milliseconds to wait until the configured sending
+ * window opens, or 0 if no window is configured / we are already inside the window.
+ *
+ * The sending window lets users restrict mail merge delivery to business hours (e.g.
+ * Mon-Fri 09:00-17:00) to avoid recipients receiving bulk emails at midnight.
+ *
+ * Logic:
+ *   - If the "Sending window" checkbox is unchecked, returns 0 immediately (no restriction).
+ *   - If we are currently inside the window (weekday AND time between start and end), returns 0.
+ *   - If today is a weekday but we haven't reached the window start yet, returns ms until today's start.
+ *   - If we are past the window (or it's a weekend), returns ms until next weekday's window start.
+ *
+ * The while(true) loop advances `daysAhead` until it lands on a Mon-Fri. With a maximum
+ * of 2 weekend days to skip, this loop always terminates in at most 2 iterations.
+ *
+ * @returns {number} milliseconds to wait (0 = send now)
+ */
 function msUntilWindowOpens() {
   const sendingWindowEl = document.getElementById("sendingWindowEnabled");
   const enabled = sendingWindowEl && sendingWindowEl.checked;
-  if (!enabled) return 0;
+  if (!enabled) return 0; // Feature disabled — no restriction
   const now = new Date();
   const day = now.getDay(); // 0=Sun, 6=Sat
   const startParts = (document.getElementById("windowStart").value || "09:00").split(":").map(Number);
   const endParts = (document.getElementById("windowEnd").value || "17:00").split(":").map(Number);
+  // Convert HH:MM to total minutes-since-midnight for easy comparison
   const startMins = startParts[0] * 60 + startParts[1];
   const endMins = endParts[0] * 60 + endParts[1];
   // L5: guard against inverted window (end <= start) which causes an infinite loop
@@ -3684,21 +4828,21 @@ function msUntilWindowOpens() {
 
   const isWeekday = day >= 1 && day <= 5;
   const inWindow = isWeekday && nowMins >= startMins && nowMins < endMins;
-  if (inWindow) return 0;
+  if (inWindow) return 0; // We're inside the window right now — send immediately
 
   // Calculate ms until next window open
   let next = new Date(now);
-  next.setSeconds(0, 0);
+  next.setSeconds(0, 0); // zero out sub-minute precision so the wait is exact to the minute
   // If today is a weekday and before window start, wait until today's start
   if (isWeekday && nowMins < startMins) {
     next.setHours(startParts[0], startParts[1], 0, 0);
     return next - now;
   }
-  // Otherwise: next Monday (or next weekday) at window start
+  // Otherwise (after end of window, or it's a weekend): find the next weekday
   let daysAhead = 1;
   while (true) {
-    const nextDay = (day + daysAhead) % 7;
-    if (nextDay >= 1 && nextDay <= 5) break;
+    const nextDay = (day + daysAhead) % 7; // wraps 0-6 cyclically through the week
+    if (nextDay >= 1 && nextDay <= 5) break; // Mon=1 … Fri=5
     daysAhead++;
   }
   next.setDate(next.getDate() + daysAhead);
@@ -3708,21 +4852,39 @@ function msUntilWindowOpens() {
 
 /* ─── RATE LIMITING (Feature 3) ───────────────────────────────── */
 
-let emailsSentThisHour = 0;
-let emailsSentToday = 0;
-let hourWindowStart = Date.now();
-let dayWindowStart = new Date().setHours(0, 0, 0, 0);
+// In-memory counters for the current session. Persisted to localStorage by
+// saveRateLimitState() so they survive a task pane reload within the same day/hour.
+let emailsSentThisHour = 0; // count of emails sent within the current rolling 1-hour window
+let emailsSentToday = 0;    // count of emails sent since midnight (day window)
+let hourWindowStart = Date.now();                      // epoch ms when the current hourly window opened
+let dayWindowStart = new Date().setHours(0, 0, 0, 0); // epoch ms at the start of today (midnight)
 
 /* ─── RATE LIMIT STATE PERSISTENCE (Feature 8) ─────────────────── */
 
+/**
+ * loadRateLimitState() — restore rate limit counters from localStorage on startup.
+ *
+ * Without persistence, closing and reopening the task pane would reset the counters to 0,
+ * allowing a user to trivially bypass the hourly cap by reloading. By saving to localStorage
+ * on every batch and restoring here, the counters accurately reflect the actual send history
+ * for the current hour and day even after a reload.
+ *
+ * Restore logic:
+ *   - Hourly counter: only restored if the saved window started within the last 3600 s.
+ *     If it's older, the window has expired and the counter should start fresh.
+ *   - Daily counter: only restored if the saved day-window start is >= today's midnight.
+ *     This resets correctly across midnight without needing a timer.
+ */
 function loadRateLimitState() {
   const saved = lsGet("mm_rate_state", null);
   if (saved) {
     const now = Date.now();
+    // Only use the saved hourly count if we're still within the same 1-hour window
     if (saved.hourWindowStart && (now - saved.hourWindowStart) < 3600000) {
       emailsSentThisHour = saved.emailsSentThisHour || 0;
       hourWindowStart = saved.hourWindowStart;
     }
+    // Only use the saved daily count if the saved window started today (same or later than midnight)
     const todayStart = new Date().setHours(0, 0, 0, 0);
     if (saved.dayWindowStart && saved.dayWindowStart >= todayStart) {
       emailsSentToday = saved.emailsSentToday || 0;
@@ -3731,19 +4893,38 @@ function loadRateLimitState() {
   }
 }
 
+/**
+ * saveRateLimitState() — persist the current rate limit counters to localStorage.
+ * Called once per batch (not per email) to minimise localStorage writes.
+ */
 function saveRateLimitState() {
   lsSet("mm_rate_state", JSON.stringify({ emailsSentThisHour, emailsSentToday, hourWindowStart, dayWindowStart }));
 }
 
+/**
+ * checkRateLimits() — enforce hourly and daily send caps, pausing if needed.
+ *
+ * Called at the top of each batch before sending. Two checks:
+ *   1. Daily cap: if emailsSentToday >= dailyCap, stops the merge entirely (returns false).
+ *      Unlike the hourly limit, we don't wait — the daily cap is absolute for the day.
+ *   2. Hourly cap: if emailsSentThisHour >= maxPerHour, waits until the hour window resets
+ *      then returns true so the send continues. The await causes the UI to remain responsive
+ *      while paused (unlike a synchronous sleep).
+ *
+ * Returns true = continue sending, false = stop entirely (daily cap hit).
+ *
+ * @async
+ * @returns {Promise<boolean>}
+ */
 async function checkRateLimits() {
-  // Refresh hour window if needed
+  // Refresh hour window if the last window opened more than 1 hour ago
   if (Date.now() - hourWindowStart >= 3600000) {
     hourWindowStart = Date.now();
     emailsSentThisHour = 0;
   }
-  // Refresh day window if needed
+  // Refresh day window if we've crossed midnight since the window was set
   if (Date.now() - dayWindowStart >= 86400000) {
-    dayWindowStart = new Date().setHours(0, 0, 0, 0);
+    dayWindowStart = new Date().setHours(0, 0, 0, 0); // reset to today's midnight
     emailsSentToday = 0;
   }
 
@@ -3753,16 +4934,18 @@ async function checkRateLimits() {
   const dailyCap   = parseInt(dailyCapEl2   ? dailyCapEl2.value   : "0", 10);
 
   if (dailyCap > 0 && emailsSentToday >= dailyCap) {
+    // Daily cap reached — stop the entire merge run, don't just pause
     log(`Daily cap of ${dailyCap} reached. Stopping merge.`, "warning");
     return false;
   }
 
   if (maxPerHour > 0 && emailsSentThisHour >= maxPerHour) {
+    // Hourly cap reached — calculate exact ms until the current window resets and wait
     const msUntilReset = hourWindowStart + 3600000 - Date.now();
     const waitMins = Math.ceil(msUntilReset / 60000);
     log(`⏸ Hourly limit of ${maxPerHour} reached. Pausing ${waitMins} min until hour resets…`, "warning");
-    await new Promise(r => setTimeout(r, msUntilReset));
-    hourWindowStart = Date.now();
+    await new Promise(r => setTimeout(r, msUntilReset)); // async wait — UI stays responsive
+    hourWindowStart = Date.now(); // start a fresh hour window
     emailsSentThisHour = 0;
     log("▶ Resuming sends (hour window reset).", "info");
   }
@@ -3772,6 +4955,28 @@ async function checkRateLimits() {
 
 /* ─── GRAPH BATCH SEND ─────────────────────────────────────────── */
 
+/**
+ * buildEmailRequest(id, toEmail, opts) — construct a single Graph $batch request object
+ * for one recipient.
+ *
+ * The Graph $batch endpoint accepts an array of up to 20 individual request objects.
+ * Each object has an `id` (for correlating responses), `method`, `url`, `headers`, and `body`.
+ * This function builds exactly one such object for a single personalised email.
+ *
+ * The `id` parameter is the 1-based index within the current batch (not the global row number).
+ * It's returned verbatim in each batch response so we can map responses back to recipients:
+ *   response.id === "3" → recipients[2] (zero-indexed).
+ *
+ * draftsMode toggle: when draftsMode is true, the URL is /me/messages (creates a draft)
+ * rather than /me/sendMail, and the body format changes accordingly:
+ *   sendMail: { message: {...}, saveToSentItems: bool }
+ *   drafts:   { ...message fields directly (no wrapper) }
+ *
+ * @param {number} id      - 1-based batch request ID (used to correlate responses)
+ * @param {string} toEmail - semicolon-separated To address(es) from the recipient's email column
+ * @param {Object} opts    - all email options (see destructuring below for full list)
+ * @returns {Object} Graph $batch request object { id, method, url, headers, body }
+ */
 function buildEmailRequest(id, toEmail, opts) {
   const {
     subject, htmlBody, saveToSent,
@@ -3840,13 +5045,41 @@ function buildEmailRequest(id, toEmail, opts) {
   };
 }
 
+/**
+ * effectiveBatchSize(attachmentSizeBytes) — calculate how many emails to put in each
+ * Graph $batch request based on attachment size.
+ *
+ * The Graph $batch endpoint enforces a 4 MB limit per individual request AND a total
+ * payload limit for the whole batch POST. Attachments are base64-encoded in the JSON body,
+ * which inflates their size by ~37% (the 1.37 multiplier). We add 4096 bytes per email
+ * as a rough overhead budget for all the JSON fields (subject, recipients, headers etc.).
+ *
+ * The formula finds the maximum number of emails N such that N * perEmailBytes <= 3.5 MB.
+ * We use 3.5 MB as the target (not 4 MB) to leave a 0.5 MB safety margin. The result is
+ * clamped to [1, BATCH_SIZE] so we never send 0 emails or more than the API's maximum.
+ *
+ * @param {number} attachmentSizeBytes - total attachment bytes (before base64 encoding) per email
+ * @returns {number} number of emails per batch (1 to BATCH_SIZE)
+ */
 function effectiveBatchSize(attachmentSizeBytes) {
-  if (!attachmentSizeBytes) return BATCH_SIZE;
-  const base64Bytes   = Math.ceil(attachmentSizeBytes * 1.37);
-  const perEmailBytes = base64Bytes + 4096;
+  if (!attachmentSizeBytes) return BATCH_SIZE; // No attachments — use the full configured batch size
+  const base64Bytes   = Math.ceil(attachmentSizeBytes * 1.37); // base64 adds ~37% overhead
+  const perEmailBytes = base64Bytes + 4096;                    // add JSON field overhead per email
   return Math.max(1, Math.min(BATCH_SIZE, Math.floor(3_500_000 / perEmailBytes)));
 }
 
+/**
+ * buildUnsubHeaders(url) — generate the RFC 8058 List-Unsubscribe and List-Unsubscribe-Post
+ * headers for one-click unsubscribe support.
+ *
+ * Gmail and other inbox providers use these headers to show a prominent "Unsubscribe" button
+ * at the top of bulk emails. RFC 8058 defines the one-click format: a POST to the URL with
+ * the body "List-Unsubscribe=One-Click". Without both headers, Gmail shows the standard
+ * (slower, two-step) unsubscribe flow instead.
+ *
+ * @param {string} url - the fully-qualified unsubscribe URL (from listUnsubscribeTemplate after personalization)
+ * @returns {{ name: string, value: string }[]} pair of Graph internetMessageHeader objects
+ */
 function buildUnsubHeaders(url) {
   return [
     { name: "List-Unsubscribe",      value: `<${url}>` },
@@ -3854,25 +5087,47 @@ function buildUnsubHeaders(url) {
   ];
 }
 
+/**
+ * chunkArray(arr, size) — split an array into sub-arrays of at most `size` elements.
+ * Used to split the full recipients array into batches of BATCH_SIZE for Graph $batch.
+ */
 function chunkArray(arr, size) {
   const chunks = [];
   for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
   return chunks;
 }
 
+/**
+ * delay(ms) — return a Promise that resolves after `ms` milliseconds.
+ * Using await delay(ms) is the idiomatic async equivalent of a blocking sleep —
+ * it yields execution back to the event loop so the UI stays responsive during waits.
+ */
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * getJitterMs() — return a random jitter delay in milliseconds within the user's configured range.
+ *
+ * Jitter adds randomness between batches so that a large send doesn't hit the Graph API
+ * with perfectly uniform timing. Exchange Online's throttling is partly time-based, so
+ * spreading requests randomly (rather than at a fixed interval) reduces the chance of
+ * triggering sustained throttling even when average send rate is within limits.
+ *
+ * The min/max values are in seconds in the UI — we multiply by 1000 to get milliseconds.
+ * Math.min/max guards against the user entering min > max (swaps them silently).
+ *
+ * @returns {number} a random millisecond delay in [lo*1000, hi*1000), or 0 if jitter is disabled
+ */
 function getJitterMs() {
   const minEl = document.getElementById("jitterMinInput");
   const maxEl = document.getElementById("jitterMaxInput");
   const min = parseInt(minEl ? minEl.value : "0", 10);
   const max = parseInt(maxEl ? maxEl.value : "0", 10);
-  if (!min && !max) return 0;
-  const lo = Math.min(min, max);
+  if (!min && !max) return 0; // Both zero = jitter disabled
+  const lo = Math.min(min, max); // Ensure lo <= hi even if user entered them backwards
   const hi = Math.max(min, max);
-  return (lo + Math.random() * (hi - lo)) * 1000;
+  return (lo + Math.random() * (hi - lo)) * 1000; // Random ms in [lo, hi)
 }
 
 /**
@@ -3957,6 +5212,57 @@ async function sendBatchWithRetry(requests, token) {
 
 /* ─── SCHEDULED SEND ───────────────────────────────────────────── */
 
+/**
+ * sendScheduledMessages(...) — send personalised emails with Exchange deferred delivery.
+ *
+ * Unlike immediate batch send (which uses /me/sendMail directly), scheduled send must
+ * go through a two-step process:
+ *   Step 1: POST to /me/messages — creates a draft with a singleValueExtendedProperty
+ *           that sets the deferred delivery time (MAPI property "SystemTime 0x000F").
+ *           This is the standard Exchange/Outlook "delay delivery" mechanism.
+ *   Step 2: POST to /me/messages/{id}/send — instructs Exchange to send the draft.
+ *           Exchange then holds it in the Outbox until the scheduled time, even if
+ *           Outlook is closed. This is why "Save to Sent" can't be suppressed — Exchange
+ *           always saves deferred sends.
+ *
+ * Because each email is two separate API calls (not batchable — /me/messages/{id}/send
+ * isn't supported in Graph $batch for deferred delivery), scheduled send is inherently
+ * slower than immediate batch send and runs one email at a time.
+ *
+ * Per-row send_at override: if a CSV row has a `send_at` column with a valid date/time,
+ * that overrides the global scheduled time for that specific recipient. This allows
+ * different recipients to receive their email at different times within one merge run.
+ *
+ * Auth error handling: if token acquisition fails mid-run, all remaining recipients are
+ * pushed to failedRecipients for retry, and the loop breaks. A 403 error (Mail.ReadWrite
+ * not granted) causes an immediate abort for all remaining recipients, since every
+ * subsequent request would also fail.
+ *
+ * @async
+ * @param {Array<Object>} recipients    - validated recipient rows
+ * @param {string} subjectTemplate      - subject line with {{tokens}}
+ * @param {string} bodyTemplate         - HTML body with {{tokens}}
+ * @param {boolean} saveToSent          - ignored (Exchange always saves), but logged as warning
+ * @param {string} replyTo              - Reply-To address
+ * @param {string} sendAs               - Send As address (from field override)
+ * @param {string} scheduledTimeISO     - ISO 8601 global scheduled delivery time
+ * @param {string} importance           - "low" | "normal" | "high"
+ * @param {boolean} isReadReceiptRequested
+ * @param {boolean} isDeliveryReceiptRequested
+ * @param {Array} customHeaders         - parsed custom MIME headers
+ * @param {boolean} plainText           - strip HTML to plain text before sending
+ * @param {string} sensitivity          - "normal" | "personal" | "private" | "confidential"
+ * @param {string[]} categories         - Outlook category names
+ * @param {boolean} bccSelf             - BCC the sender's own address
+ * @param {string} selfEmail            - sender's email for BCC self
+ * @param {boolean} flagged             - flag sent items for follow-up
+ * @param {string|null} expiryISO       - ISO 8601 message expiry time
+ * @param {string} listUnsubscribeTemplate - URL template for List-Unsubscribe header
+ * @param {Array} inlineImagesArr       - inline CID images from the compose window
+ * @param {number} globalOffset         - index of first recipient in the full valid array (for record_num)
+ * @param {number} totalRecipientCount  - total valid recipient count across all sends (for record_count)
+ * @returns {Promise<{totalSent: number, totalFailed: number}>}
+ */
 async function sendScheduledMessages(
   recipients, subjectTemplate, bodyTemplate, saveToSent,
   replyTo, sendAs, scheduledTimeISO,
@@ -4138,6 +5444,51 @@ async function sendScheduledMessages(
 
 /* ─── IMMEDIATE BATCH SEND HELPER ──────────────────────────────── */
 
+/**
+ * sendImmediateBatch(...) — send personalised emails immediately using Graph $batch.
+ *
+ * This is the main send path for non-scheduled, non-broadcast sends (and also for
+ * drafts mode). It batches up to BATCH_SIZE (20) emails per Graph $batch POST.
+ *
+ * High-level flow per batch:
+ *   1. Pre-personalise all emails in the current batch and build Graph request objects.
+ *   2. Acquire an OAuth2 token (re-authenticates if needed).
+ *   3. POST the batch to Graph's $batch endpoint via sendBatchWithRetry().
+ *   4. Parse the response array — 2xx = success, 429 = throttled (handled in sendBatchWithRetry),
+ *      401 = token expired (abort remaining), other = failure.
+ *   5. Update send counters, push failed recipients for retry, record outcomes for the report.
+ *   6. Wait batchDelayMs + jitter before the next batch.
+ *
+ * The `allValid` parameter is the full valid recipient array (across all send paths).
+ * It's used to compute the correct global `record_num` and `record_count` tokens for each
+ * recipient even in mixed scheduled/immediate runs where `recipients` is a subset of `allValid`.
+ *
+ * effectiveBatchSize() reduces batch size when attachments are present to stay within
+ * Graph's 4 MB per-batch limit — see that function for the calculation.
+ *
+ * @async
+ * @param {Array<Object>} recipients          - recipients to send to in this call
+ * @param {string} subjectTemplate            - subject with {{tokens}}
+ * @param {string} emailBodyTemplate          - HTML body with {{tokens}}
+ * @param {boolean} saveToSent                - include in Sent Items
+ * @param {string} replyTo                    - Reply-To address
+ * @param {string} sendAs                     - Send As address
+ * @param {string} importance                 - "low" | "normal" | "high"
+ * @param {boolean} isReadReceiptRequested
+ * @param {boolean} isDeliveryReceiptRequested
+ * @param {Array} globalCustomHeaders         - parsed custom MIME headers
+ * @param {boolean} plainTextMode             - strip HTML
+ * @param {string} sensitivity
+ * @param {string[]} categories
+ * @param {boolean} bccSelf
+ * @param {string} selfEmail
+ * @param {boolean} flagged
+ * @param {string|null} expiryISO
+ * @param {string} listUnsubscribeTemplate
+ * @param {Array} inlineImagesArr
+ * @param {Array<Object>} allValid            - full validated recipient list for record_num computation
+ * @returns {Promise<{totalSent: number, totalFailed: number}>}
+ */
 async function sendImmediateBatch(
   recipients, subjectTemplate, emailBodyTemplate, saveToSent,
   replyTo, sendAs, importance, isReadReceiptRequested, isDeliveryReceiptRequested,
@@ -4333,6 +5684,28 @@ async function sendImmediateBatch(
 
 /* ─── PRE-SEND CONFIRMATION MODAL (Feature C) ─────────────────── */
 
+/**
+ * showPreSendConfirmation(recipients, batchDelayMs, scheduledCount) — show a summary modal
+ * before sending, giving the user one last chance to review recipient count, first recipient
+ * preview, and estimated time.
+ *
+ * Skipped for single sends (count <= 1) to avoid interrupting quick test sends.
+ *
+ * The time estimate accounts for both the inter-batch delay configured by the user AND
+ * the round-trip time for each Graph API batch call (~2 s). Without the batch round-trip
+ * estimate, the displayed time would be too low for large sends with no delay configured.
+ *
+ * A breakdown of immediate vs. scheduled recipients is shown when both are present
+ * (i.e. some rows have a send_at column and some don't).
+ *
+ * Returns a Promise<boolean> that resolves true (confirm) or false (cancel) based on
+ * which button the user clicks.
+ *
+ * @param {Array<Object>} recipients    - the full list of valid recipients about to be sent
+ * @param {number} batchDelayMs         - configured delay between batches in milliseconds
+ * @param {number} scheduledCount       - number of recipients with a send_at column value
+ * @returns {Promise<boolean>}
+ */
 async function showPreSendConfirmation(recipients, batchDelayMs, scheduledCount) {
   const count = recipients.length;
   if (count <= 1) return true; // skip modal for single sends
@@ -4398,62 +5771,108 @@ async function showPreSendConfirmation(recipients, batchDelayMs, scheduledCount)
 
 /* ─── MODAL FOCUS TRAP (Feature 15) ────────────────────────────── */
 
+/**
+ * trapFocus(modal) — constrain keyboard Tab focus to within a modal dialog.
+ *
+ * WCAG accessibility guideline 2.1.2 requires that keyboard focus not leave a modal
+ * while it is open. Without a trap, pressing Tab from the last focusable element inside
+ * the modal would move focus to elements behind it in the DOM — the modal might as well
+ * not exist for keyboard users.
+ *
+ * Implementation: intercept Tab and Shift+Tab keydown events. When focus reaches the
+ * first or last focusable element in the modal and the user Tabs further, we intercept
+ * e.preventDefault() and manually move focus to the other end of the focusable list.
+ *
+ * Returns a cleanup function. Callers MUST call it when closing the modal to remove
+ * the event listener — failing to do so would leave a handler attached to a hidden
+ * element that fires on every Tab press.
+ *
+ * @param {HTMLElement} modal - the modal DOM element to trap focus within
+ * @returns {Function} cleanup function that removes the keydown listener
+ */
 function trapFocus(modal) {
   const focusable = modal.querySelectorAll(
     'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex="0"]'
   );
-  if (!focusable.length) return function() {};
+  if (!focusable.length) return function() {}; // Empty modal — nothing to trap, return no-op cleanup
   const first = focusable[0];
   const last  = focusable[focusable.length - 1];
-  first.focus();
+  first.focus(); // Move focus into the modal immediately on open
 
   function handler(e) {
-    if (e.key !== "Tab") return;
+    if (e.key !== "Tab") return; // Only intercept Tab, pass everything else through
     if (e.shiftKey) {
+      // Shift+Tab at the first element → wrap to the last
       if (document.activeElement === first) { e.preventDefault(); last.focus(); }
     } else {
+      // Tab at the last element → wrap to the first
       if (document.activeElement === last) { e.preventDefault(); first.focus(); }
     }
   }
   modal.addEventListener("keydown", handler);
-  return function() { modal.removeEventListener("keydown", handler); };
+  return function() { modal.removeEventListener("keydown", handler); }; // cleanup function
 }
 
 // Map of modalId → { prevFocus, releaseTrap }
+// Stores pre-open focus state and the cleanup function for each currently-open modal.
+// Multiple modals can be open simultaneously (e.g. confirm inside check errors), so we
+// use a Map rather than a single variable.
 const _modalTrapState = new Map();
 
+/**
+ * _openModalWithTrap(modalId) — show a modal and set up its focus trap.
+ * Saves the element that had focus before the modal opened so _closeModalWithTrap
+ * can restore it when the modal is dismissed (required by WCAG 2.4.3).
+ */
 function _openModalWithTrap(modalId) {
   const modal = document.getElementById(modalId);
   if (!modal) return;
-  const prevFocus = document.activeElement;
+  const prevFocus = document.activeElement; // snapshot focus before modal steals it
   modal.classList.remove("hidden");
-  const releaseTrap = trapFocus(modal);
-  _modalTrapState.set(modalId, { prevFocus, releaseTrap });
+  const releaseTrap = trapFocus(modal); // sets up Tab trap and moves focus into modal
+  _modalTrapState.set(modalId, { prevFocus, releaseTrap }); // store for cleanup
 }
 
+/**
+ * _closeModalWithTrap(modalId) — hide a modal and release its focus trap.
+ * Restores focus to the element that was active before the modal opened.
+ */
 function _closeModalWithTrap(modalId) {
   const modal = document.getElementById(modalId);
   if (modal) modal.classList.add("hidden");
   const state = _modalTrapState.get(modalId);
   if (state) {
-    state.releaseTrap();
+    state.releaseTrap(); // remove the keydown event listener
+    // Restore focus to wherever the user was before opening the modal
     if (state.prevFocus && typeof state.prevFocus.focus === "function") state.prevFocus.focus();
-    _modalTrapState.delete(modalId);
+    _modalTrapState.delete(modalId); // clean up the Map entry
   }
 }
 
 /* ─── SIMPLE CONFIRM MODAL HELPER ─────────────────────────────── */
 
+/**
+ * showSimpleConfirm(message) — show the confirmModal with a generic Yes/No prompt.
+ *
+ * Reuses the main confirm modal but changes the send button label to "Yes" and
+ * restores the original text when the modal closes. This lets non-send confirmations
+ * (like "Clear opt-out list?") share the same modal without a separate HTML element.
+ *
+ * Resolves true on Yes, false on No/dismiss (via dismissModal / confirmSend).
+ *
+ * @param {string} message - the question to display in the modal body
+ * @returns {Promise<boolean>}
+ */
 function showSimpleConfirm(message) {
   document.getElementById("confirmText").textContent = message;
   const sendBtn = document.getElementById("confirmSendBtn");
-  const savedText = sendBtn.textContent;
-  sendBtn.textContent = "Yes";
+  const savedText = sendBtn.textContent; // remember original label (e.g. "Send" or "Save as drafts")
+  sendBtn.textContent = "Yes";           // generic label for non-send confirmations
   _openModalWithTrap("confirmModal");
   return new Promise(function(resolve) {
     _confirmModalPrevFocusSaved = true;
     pendingMergeResolve = function(result) {
-      sendBtn.textContent = savedText;
+      sendBtn.textContent = savedText; // restore original label before resolving
       resolve(result);
     };
   });
@@ -4462,8 +5881,28 @@ let _confirmModalPrevFocusSaved = false;
 
 /* ─── CONFIRMATION MODAL ───────────────────────────────────────── */
 
+// pendingMergeResolve holds the Promise resolve function for the currently-open confirm modal.
+// confirmSend() and dismissModal() call it to resolve the modal's Promise. Using a module-level
+// variable (rather than closure) means only one confirm modal can be open at a time — which is
+// correct, since we don't ever want two overlapping confirmations.
 let pendingMergeResolve = null;
 
+/**
+ * showConfirmModal(rowCount, addressCount, scheduledTimeISO, broadcastMode) — show the
+ * "are you sure you want to send?" confirmation modal before a merge or broadcast run.
+ *
+ * Builds a human-readable summary string that describes exactly what is about to happen:
+ *   - Normal merge: "This will send 42 emails." (or "42 emails (reaching 50 addresses)" for multi-TO rows)
+ *   - Scheduled merge: "This will schedule 42 emails to be sent at ..."
+ *   - Drafts mode: "This will save 42 emails as drafts ..."
+ *   - Broadcast mode: "Send 1 broadcast email to 42 recipients via BCC?"
+ *
+ * @param {number} rowCount           - number of individual emails (CSV rows) to send
+ * @param {number} addressCount       - total number of unique To addresses (>rowCount for multi-TO rows)
+ * @param {string|null} scheduledTimeISO - ISO 8601 scheduled delivery time, or null for immediate
+ * @param {boolean} broadcastMode     - true for broadcast (BCC) sends
+ * @returns {Promise<boolean>}        - true = user confirmed, false = user cancelled
+ */
 function showConfirmModal(rowCount, addressCount, scheduledTimeISO, broadcastMode) {
   return new Promise((resolve) => {
     pendingMergeResolve = resolve;
@@ -4500,6 +5939,13 @@ function showConfirmModal(rowCount, addressCount, scheduledTimeISO, broadcastMod
   });
 }
 
+/**
+ * confirmSend() — called by the "Send" button inside the confirmation modal.
+ * Resolves the pending Promise with true and closes the modal.
+ * We null out pendingMergeResolve before calling resolve() to prevent a second
+ * click from triggering a double-resolution (which the Promise spec ignores but
+ * would leave the modal in an inconsistent state).
+ */
 function confirmSend() {
   const resolve = pendingMergeResolve;
   pendingMergeResolve = null;
@@ -4507,6 +5953,10 @@ function confirmSend() {
   if (resolve) resolve(true);
 }
 
+/**
+ * dismissModal() — called by the "Cancel" button or backdrop click in the confirmation modal.
+ * Resolves the pending Promise with false (user cancelled the merge).
+ */
 function dismissModal() {
   const resolve = pendingMergeResolve;
   pendingMergeResolve = null;
@@ -4516,12 +5966,36 @@ function dismissModal() {
 
 /* ─── CANCEL ───────────────────────────────────────────────────── */
 
+/**
+ * handleStop() — set the cancelRequested flag so the merge loop breaks at the next
+ * batch boundary. We don't abort the current in-flight batch — that would leave some
+ * emails sent and others not, with no way to know which. Instead we finish the current
+ * batch cleanly and skip all subsequent batches.
+ */
 function handleStop() {
   cancelRequested = true;
   log("Stop requested — will halt after current batch.", "warning");
-  document.getElementById("stopBtn").disabled = true;
+  document.getElementById("stopBtn").disabled = true; // Prevent double-stop clicks
 }
 
+/**
+ * setMergeRunning(running) — toggle the UI between "merge in progress" and "idle" states.
+ *
+ * When running = true:
+ *   - Disables the Send, Test, Drafts, and Broadcast buttons to prevent concurrent runs.
+ *   - Changes the Send button text to indicate the merge is in progress.
+ *   - Shows the Stop button so the user can abort.
+ *   - Resets the progress bar to 0% and clears the _mergeCompletedSuccessfully flag.
+ *
+ * When running = false:
+ *   - Re-enables all action buttons.
+ *   - Hides the Stop button.
+ *   - If _mergeCompletedSuccessfully is true (showMergeComplete was called), the progress bar
+ *     stays visible showing "Done" — we don't call hideProgress() in that case.
+ *
+ * Called twice per merge: once at the start of sendBatchWithRetry (running=true) and once
+ * in the finally block (running=false) to guarantee the UI is always restored even on error.
+ */
 function setMergeRunning(running) {
   const mergeBtn     = document.getElementById("mergeBtn");
   const stopBtn      = document.getElementById("stopBtn");
@@ -4541,7 +6015,8 @@ function setMergeRunning(running) {
     const fill = document.getElementById("progressFill");
     if (fill) fill.style.width = "0%";
   } else if (!_mergeCompletedSuccessfully) {
-    // Feature 5: only hide progress if we did NOT just call showMergeComplete
+    // Feature 5: only hide progress if we did NOT just call showMergeComplete —
+    // if we did call it, the progress bar should stay at 100% showing the "Done" state
     hideProgress();
   }
 }
@@ -4954,16 +6429,47 @@ async function handleMergeClick() {
 
 /* ─── CSV FIELD ESCAPING HELPER ────────────────────────────────── */
 
+/**
+ * csvField(val) — safely format a value for inclusion in a CSV file (RFC 4180).
+ *
+ * A value must be quoted if it contains a comma (would split into multiple columns),
+ * a double-quote (would break quoting), or a newline (would split into multiple rows).
+ * When quoting, existing double-quotes inside the value are escaped by doubling them ("").
+ *
+ * This is used when building the simulation CSV download, the send report CSV,
+ * and when importing contacts into the CSV textarea.
+ *
+ * @param {*} val - any value (will be coerced to string)
+ * @returns {string} RFC 4180-safe CSV field
+ */
 function csvField(val) {
   const s = String(val !== null && val !== undefined ? val : "");
   if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+    // Wrap in double-quotes and double any existing double-quotes inside
     return '"' + s.replace(/"/g, '""') + '"';
   }
-  return s;
+  return s; // No special characters — safe to use as-is
 }
 
 /* ─── GROUPED ROW MERGE (Feature 4) ───────────────────────────── */
 
+/**
+ * groupRecipientsByEmail(recipients) — merge multiple CSV rows with the same email address
+ * into a single recipient object with a `_groupedRows` array.
+ *
+ * This is the "many-to-one" merge feature: a single email gets all rows for that recipient.
+ * The primary (first) row's fields are used for the top-level token replacements; all rows
+ * (including the primary) are available in _groupedRows for use with {{merge_table}}.
+ *
+ * Use case: a recipient purchased 3 items — each row has the same email but different
+ * product names. The merge sends one email containing a table of all 3 products.
+ *
+ * The Map key is the lowercase email to match case-insensitively (foo@BAR.com and foo@bar.com
+ * are the same person and should be grouped together).
+ *
+ * @param {Array<Object>} recipients - the validated recipient list
+ * @returns {Array<Object>} deduplicated list with _groupedRows added to grouped recipients
+ */
 function groupRecipientsByEmail(recipients) {
   const map = new Map();
   for (const r of recipients) {
@@ -4973,13 +6479,26 @@ function groupRecipientsByEmail(recipients) {
       log(`Row skipped in group merge: empty email address (row data: ${JSON.stringify(r).slice(0, 80)}).`, "warning");
       continue;
     }
-    if (!map.has(key)) map.set(key, { primary: r, rows: [r] });
-    else map.get(key).rows.push(r);
+    if (!map.has(key)) map.set(key, { primary: r, rows: [r] }); // first occurrence = primary
+    else map.get(key).rows.push(r);                              // subsequent occurrences added to group
   }
+  // Spread primary row fields and add _groupedRows array containing all rows for that email
   return Array.from(map.values()).map(({ primary, rows }) => ({ ...primary, _groupedRows: rows }));
 }
 
+/**
+ * buildMergeTable(rows, headers) — build an HTML table from the grouped rows of a recipient.
+ *
+ * Used by personalize() to replace {{merge_table}} when a recipient has _groupedRows.
+ * Excludes operational columns (email, cc, bcc, etc.) that would clutter the table —
+ * only data columns meaningful to the recipient are included.
+ *
+ * @param {Array<Object>} rows    - all CSV rows for one recipient (from _groupedRows)
+ * @param {string[]} headers      - column names from the first grouped row
+ * @returns {string} HTML table string safe to embed directly in the email body
+ */
 function buildMergeTable(rows, headers) {
+  // Exclude meta columns that are operational (not content for the recipient)
   const cols = headers.filter(h => !["email","cc","bcc","attachment","skip_if","send_at","reply_to","display_name"].includes(h.toLowerCase()));
   let html = '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;width:100%"><thead><tr>';
   for (const col of cols) html += `<th style="background:#f0f0f0;padding:4px 8px">${escapeHtml(col)}</th>`;
@@ -4995,15 +6514,26 @@ function buildMergeTable(rows, headers) {
 
 /* ─── OPT-OUT / UNSUBSCRIBE LIST (Feature 5) ──────────────────── */
 
+// localStorage key for the persistent opt-out list (separate from the run-level suppression set
+// which lives in suppressionSet). The opt-out list is permanent across sessions; the suppression
+// set is loaded from a CSV and cleared when a new CSV is loaded.
 const LS_KEY_OPTOUT = "mm_optout_list";
 
+/**
+ * getOptOutList() — return the persistent opt-out list as a lowercase Set for fast lookup.
+ * Lowercase normalisation ensures foo@BAR.com matches foo@bar.com in the exclusion check.
+ */
 function getOptOutList() {
   return new Set((lsGet(LS_KEY_OPTOUT, []) || []).map(e => e.toLowerCase().trim()));
 }
 
+/**
+ * saveOptOutList(set) — persist the opt-out Set to localStorage and re-render the UI list.
+ * Always stores the full Set (not a delta) so it's safe to call with any state of the list.
+ */
 function saveOptOutList(set) {
   lsSet(LS_KEY_OPTOUT, JSON.stringify(Array.from(set)));
-  renderOptOutList();
+  renderOptOutList(); // update the visible list immediately after every change
 }
 
 function renderOptOutList() {
@@ -5086,6 +6616,26 @@ function initOptOutUI() {
 
 /* ─── FILL-IN PROMPT (Feature 6) ──────────────────────────────── */
 
+/**
+ * collectFillInValues(template) — scan the template for {{fill_in:prompt}} tokens,
+ * show a modal asking the user to fill in each one, and return the values.
+ *
+ * The fill-in feature is for values that are the SAME for all recipients but are not
+ * known ahead of time — e.g. a conference date, a promo code, or a personalised opening
+ * line the sender wants to type fresh for each batch.
+ *
+ * How it works:
+ *   1. Find all unique {{fill_in:prompt}} tokens in the combined subject+body template.
+ *   2. Dynamically build form fields inside the fillInModal (one per unique prompt).
+ *   3. Show the modal and await the user's OK/Cancel.
+ *   4. Return a Map<promptName, value> so applyFillInValues() can substitute them.
+ *
+ * Returns null if the user cancels (which aborts the merge run).
+ * Returns the Map even if the user left some fields blank — blanks substitute to "".
+ *
+ * @param {string} template - combined subject + body template string
+ * @returns {Promise<Map<string, string>|null>} map of prompt→value, or null if cancelled
+ */
 async function collectFillInValues(template) {
   const regex = /\{\{fill_in:([^}]+)\}\}/gi;
   const prompts = new Map();
@@ -5143,6 +6693,28 @@ function applyFillInValues(template, fillInValues) {
 
 /* ─── DNS PRE-FLIGHT CHECK (Feature 7) ────────────────────────── */
 
+/**
+ * checkDomainDns(domain) — query Cloudflare's DNS-over-HTTPS API for SPF, DMARC, and DKIM
+ * records for the sender's domain.
+ *
+ * Missing email authentication records are a common reason bulk emails get rejected or land
+ * in spam. We check for all three records before large sends:
+ *   SPF (Sender Policy Framework): TXT record at the domain root with "v=spf1"
+ *   DMARC (Domain-based Message Auth): TXT record at _dmarc.domain with "v=DMARC1"
+ *   DKIM (DomainKeys Identified Mail): CNAME records at selector1._domainkey.domain
+ *                                      or selector2._domainkey.domain (Microsoft 365 convention)
+ *
+ * We use Cloudflare's DNS-over-HTTPS (cloudflare-dns.com/dns-query) because:
+ *   - Office.js add-ins run in a sandboxed WKWebView / IE11 WebView with no direct DNS access.
+ *   - The browser's built-in DNS resolver isn't accessible via JavaScript.
+ *   - Cloudflare's DoH API is reliable, fast, and free for this usage pattern.
+ *
+ * Each check is in a try/catch — a network error on one check shouldn't block the others.
+ * Results are advisory only (warnings in the log, not hard errors).
+ *
+ * @param {string} domain - e.g. "company.com" (extracted from the sender's email address)
+ * @returns {Promise<{spf: boolean, dmarc: boolean, dkim: boolean}>}
+ */
 async function checkDomainDns(domain) {
   const results = { spf: false, dmarc: false, dkim: false };
   try {
@@ -5207,10 +6779,23 @@ async function runDnsPreflightCheck(recipientCount) {
 
 /* ─── IMPORT FROM OUTLOOK CONTACTS (Feature 1) ─────────────────── */
 
-// Contacts picker state
-let contactsData = [];       // raw Graph contacts
-let selectedContacts = new Set();
+// Contacts picker state — module-level so filterContacts() and importSelectedContacts()
+// can access the full list loaded by handleImportContacts() without re-fetching.
+let contactsData = [];              // raw Graph contacts loaded from /me/contacts
+let selectedContacts = new Set();   // email addresses of checked contacts in the picker UI
 
+/**
+ * handleImportContacts() — fetch the user's Outlook contacts from Graph and show the picker modal.
+ *
+ * Uses BUG 8's pagination fix: fetches up to 500 contacts per page and follows @odata.nextLink
+ * until all contacts are loaded. Without pagination, contacts beyond the first 500 would be silently
+ * omitted — easy to miss for users with large address books.
+ *
+ * Only contacts with at least one email address are included (contacts with only phone numbers
+ * or physical addresses are not useful for mail merge).
+ *
+ * @async
+ */
 async function handleImportContacts() {
   document.getElementById("contactsModal").classList.remove("hidden");
   document.getElementById("contactsList").innerHTML = '<p style="padding:8px;color:#605e5c;">Loading…</p>';
@@ -5413,6 +6998,21 @@ async function importContactFolder(folderId, folderName) {
 
 /* ─── DUPLICATE SEND GUARD (Feature 3 v1.9) ────────────────────── */
 
+/**
+ * recordSentEmails(emails) — record a batch of sent email addresses in localStorage
+ * with the current timestamp, pruning entries older than 30 days.
+ *
+ * The send history is a simple { emailAddress: ISO-timestamp } object in localStorage.
+ * Before every merge, checkDuplicateSendHistory() scans this object and warns the user
+ * if any of their recipients appear in the history.
+ *
+ * Pruning prevents unbounded growth: we delete any entry where the stored ISO timestamp
+ * is more than 30 days ago. Using numeric comparison (getTime() < cutoffMs) rather than
+ * string comparison is important — ISO date strings do sort lexicographically correctly,
+ * but being explicit about numeric comparison prevents subtle timezone bugs.
+ *
+ * @param {string[]} emails - array of raw email strings (may be semicolon-separated multi-TO)
+ */
 function recordSentEmails(emails) {
   const history = lsGet(LS_KEY_SEND_HISTORY, {});
   const now = new Date().toISOString();
@@ -5462,6 +7062,29 @@ function showDuplicateWarningModal(dupes) {
 
 /* ─── BROADCAST MODE (Feature 1 v1.9) ──────────────────────────── */
 
+/**
+ * handleBroadcast() — send one email to all recipients at once via BCC (not personalised).
+ *
+ * Unlike the mail merge run (one personalised email per row), broadcast sends a single
+ * email with all recipients in the BCC field. This is appropriate for newsletters or
+ * announcements that are the same for every recipient. Recipients cannot see each other
+ * (BCC), which preserves privacy.
+ *
+ * Key differences from handleMergeClick():
+ *   - Subject and body are NOT personalised — no {{tokens}} are replaced.
+ *   - All recipients go in bccRecipients; the To field is set to the sender (or a
+ *     "Undisclosed Recipients" placeholder if the sender's email is unavailable).
+ *   - Per-recipient attachments are NOT supported (shared attachments and inline images are).
+ *   - Uses a single /me/sendMail call (not $batch) — one HTTP request for all recipients.
+ *
+ * Hard limit: Graph's /me/sendMail endpoint caps bccRecipients at 999 addresses.
+ * Exchange Online's own limit is 500. We warn at 500 and hard-stop at 999.
+ *
+ * broadcastInProgress re-entrancy guard: prevents a second broadcast from being launched
+ * while one is in flight (analogous to mergeInProgress for the mail merge path).
+ *
+ * @async
+ */
 async function handleBroadcast() {
   if (broadcastInProgress) {
     log("A broadcast is already in progress.", "warning");
@@ -5667,6 +7290,11 @@ async function handleBroadcast() {
 
 /* ─── SCHEDULING / RATE LIMIT ACTIVE BADGES (UX 7) ─────────────── */
 
+/**
+ * updateSchedulingBadge() — show/hide the "Scheduling active" badge on the Options tab.
+ * The badge gives the user a visible reminder that scheduled send or sending window is on,
+ * so they don't forget and wonder why their merge is paused mid-run.
+ */
 function updateSchedulingBadge() {
   const active = document.getElementById("scheduleEnabled")?.checked ||
                  document.getElementById("sendingWindowEnabled")?.checked;
@@ -5674,6 +7302,10 @@ function updateSchedulingBadge() {
   if (badge) badge.classList.toggle("hidden", !active);
 }
 
+/**
+ * updateRateLimitBadge() — show/hide the "Rate limit active" badge on the Options tab.
+ * Visible whenever hourly or daily cap is set to a non-zero value.
+ */
 function updateRateLimitBadge() {
   const mphVal = parseInt(document.getElementById("maxPerHour")?.value || "0", 10);
   const dcVal  = parseInt(document.getElementById("dailyCap")?.value   || "0", 10);
@@ -5684,6 +7316,25 @@ function updateRateLimitBadge() {
 
 /* ─── SIMULATE / DRY-RUN MODE (Feature 10) ─────────────────────── */
 
+/**
+ * handleSimulate() — run the personalisation logic for every recipient and export the
+ * results as a CSV file for review, WITHOUT sending any emails.
+ *
+ * Each output row shows:
+ *   record_num        - the row's position in the merged list
+ *   email             - the recipient's email address
+ *   display_name      - the recipient's name (display_name or first_name)
+ *   subject_preview   - the personalised subject line (first 80 chars)
+ *   body_tokens_missing - any {{tokens}} that remained unresolved (joined by "; ")
+ *   skip_if_result    - "SKIP" if the row would be skipped, "send" otherwise
+ *   attachment_found  - "check manually" if an attachment column exists, "n/a" otherwise
+ *
+ * The `await new Promise(r => setTimeout(r, 0))` yield every 50 rows prevents the UI
+ * from freezing on large lists (P1 fix) — it gives the browser's event loop a chance to
+ * process pending UI updates between batches of rows.
+ *
+ * @async
+ */
 async function handleSimulate() {
   if (!parsedRecipients.length) { log("Load a CSV first.", "warning"); showToast("Load a CSV file first from the Recipients tab.", "warning"); return; }
   const valid = getFilteredSortedRecipients();
@@ -5746,6 +7397,24 @@ async function handleSimulate() {
 
 /* ─── GAL / COMPANY DIRECTORY IMPORT (Feature 4 v1.9) ──────────── */
 
+/**
+ * searchDirectory(query) — search the Microsoft 365 Global Address List (GAL) using the
+ * Graph /me/people endpoint and render the results in the directory picker UI.
+ *
+ * /me/people uses Microsoft's "People API" which combines the GAL, contacts, and
+ * frequent collaborators into a relevance-scored list. The ConsistencyLevel: "eventual"
+ * header is required for $search queries — without it the API returns a 400 error.
+ *
+ * Requires the People.Read permission on the Entra app registration. If that permission
+ * is missing (403), we show a specific error message rather than a generic "search failed"
+ * so the IT admin knows exactly what to grant.
+ *
+ * Minimum 2 characters before querying to avoid triggering rate limits with single-letter
+ * searches (and because the results for 1-char queries are typically not useful).
+ *
+ * @async
+ * @param {string} query - the search string (at least 2 characters)
+ */
 async function searchDirectory(query) {
   const el = document.getElementById("directoryList");
   if (!query || query.length < 2) {
@@ -5832,6 +7501,19 @@ function importDirectorySelected() {
 
 /* ─── IN-COMPOSE FIELD PICKER (Feature 4 v1.8) ─────────────────── */
 
+/**
+ * populateInsertFieldSelect(headers) — rebuild the "Insert field" dropdown with the
+ * current CSV headers plus the built-in smart tokens.
+ *
+ * Called whenever the CSV is parsed or the edit table is saved so the dropdown stays
+ * in sync with available fields. Smart tokens (greeting_line, today, etc.) are listed
+ * first with a ✨ prefix to distinguish them from CSV column tokens.
+ *
+ * P2: builds all option HTML as a string then assigns to innerHTML once, rather than
+ * calling appendChild() or innerHTML += in a loop (which causes repeated DOM reparse).
+ *
+ * @param {string[]} headers - CSV column names from the parsed recipient list
+ */
 function populateInsertFieldSelect(headers) {
   const sel = document.getElementById("insertFieldSelect");
   const smart = ["greeting_line", "today", "now", "record_num", "record_count", "merge_table", "fill_in:Your prompt", "unsubscribe_link"];
@@ -5868,6 +7550,26 @@ async function handleInsertField() {
 
 /* ─── CHECK FOR ERRORS PRE-FLIGHT (Feature 1 v1.8) ─────────────── */
 
+/**
+ * handleCheckErrors() — scan the current subject and body template for token issues
+ * and display a detailed report modal before the user sends.
+ *
+ * Three types of issues are detected:
+ *   1. Unknown tokens: {{tokens}} used in the template that don't match any CSV column
+ *      or built-in smart token. These will appear literally in the sent email.
+ *   2. Blank values: known tokens where some CSV rows have an empty value for that column.
+ *      The token will be replaced with "" for those rows (the email goes out without the value).
+ *   3. Conditional tokens ({{if:...}}) are parsed separately to extract the column name from
+ *      the condition expression so they can also be checked for unknown/blank values.
+ *
+ * fill_in: tokens and merge_table are excluded from the unknown token check because
+ * they are resolved at send time (fill_in: by user input, merge_table by grouped rows).
+ *
+ * The report is rendered as innerHTML in the checkErrorsModal. All user-generated content
+ * (token names, email addresses) is passed through escapeHtml() to prevent XSS.
+ *
+ * @async
+ */
 async function handleCheckErrors() {
   if (!parsedRecipients.length) {
     log("Load a CSV first before checking for errors.", "warning");
@@ -5974,6 +7676,16 @@ async function handleCheckErrors() {
    leaving the add-in or modifying the original file.
    ═══════════════════════════════════════════════════════════════════ */
 
+/**
+ * openEditTableModal() — copy the current parsedRecipients into editTableHeaders and
+ * editTableRows (flat arrays for easier grid manipulation), then render the editable grid.
+ *
+ * The edit table is an in-memory copy — it doesn't modify parsedRecipients until the user
+ * clicks Save. This means Cancel discards all changes cleanly without needing to undo them.
+ *
+ * Internal tracking columns that start with "_" (like _csvRow, _originalIndex) are excluded
+ * from the editable grid since they're implementation details, not user-facing data.
+ */
 function openEditTableModal() {
   if (!parsedRecipients.length) {
     log("Load a recipient list first before editing.", "error");
@@ -5991,6 +7703,18 @@ function openEditTableModal() {
   if (firstCell) firstCell.focus();
 }
 
+/**
+ * renderEditTable() — build and inject the full HTML table grid into #editTableGrid.
+ *
+ * Each column header is an editable input (for renaming) with a delete button.
+ * Each data cell is an editable input that writes back to editTableRows on "input" event.
+ * Row numbers are displayed in the first column as read-only labels for reference.
+ *
+ * Performance note: the entire grid is rebuilt from scratch as a single innerHTML assignment
+ * rather than incrementally updating individual cells. For a typical recipient list
+ * (hundreds of rows) this is fast enough and much simpler than partial updates. If the
+ * table gets very large (thousands of rows) this could be optimised with virtualisation.
+ */
 function renderEditTable() {
   const grid = document.getElementById("editTableGrid");
   let html = '<table><thead><tr>';
@@ -6048,6 +7772,14 @@ function renderEditTable() {
   });
 }
 
+/**
+ * flushEditTableInputs() — read the current live values from all column header and cell
+ * inputs in the DOM and write them back into editTableHeaders and editTableRows.
+ *
+ * This is needed before any structural operation (add/delete column, save) because the
+ * user may have typed in a cell without triggering a "change" event yet. Without flushing,
+ * those edits would be lost when the grid is re-rendered.
+ */
 function flushEditTableInputs() {
   const grid = document.getElementById("editTableGrid");
   grid.querySelectorAll(".edit-col-header-input").forEach(function(input) {
@@ -6060,6 +7792,12 @@ function flushEditTableInputs() {
   });
 }
 
+/**
+ * editTableAddColumn() — add a new empty column to the in-memory edit table.
+ * Reads the column name from #newColNameInput, validates it (non-empty, no duplicate),
+ * appends the column to every row in editTableRows, and re-renders the grid.
+ * After rendering, scrolls horizontally to the new column and focuses its first cell.
+ */
 function editTableAddColumn() {
   const input = document.getElementById("newColNameInput");
   const name  = (input ? input.value.trim().toLowerCase() : "");
@@ -6084,6 +7822,18 @@ function editTableAddColumn() {
   if (newCells.length) newCells[0].focus();
 }
 
+/**
+ * saveEditTableChanges() — apply the edit table's in-memory state back to parsedRecipients
+ * and refresh all dependent UI components.
+ *
+ * The original parsedRecipients is replaced entirely with new objects built from
+ * editTableHeaders and editTableRows. Internal tracking fields (_originalIndex, _csvRow)
+ * are preserved from the original rows so that row number references in send logs and
+ * the preview table remain correct after editing.
+ *
+ * After saving, refreshAfterTableEdit() updates the recipient count, testRowSelect dropdown,
+ * tag bar, filter/sort bar, and re-renders the preview table.
+ */
 function saveEditTableChanges() {
   flushEditTableInputs();
   const oldRecipients = parsedRecipients.slice();
@@ -6102,6 +7852,17 @@ function saveEditTableChanges() {
   refreshAfterTableEdit();
 }
 
+/**
+ * refreshAfterTableEdit() — update all UI components that depend on parsedRecipients
+ * after the edit table is saved.
+ *
+ * Must be called after any operation that modifies parsedRecipients directly:
+ *   - Edit table save
+ *   - Any future in-place editing feature
+ *
+ * Resets paging state (previewTablePage = 0) and selectedRowIndices (null = all selected)
+ * to avoid stale state after a structural change to the recipient list.
+ */
 function refreshAfterTableEdit() {
   const headers = editTableHeaders.slice();
   document.getElementById("recipientCount").textContent =

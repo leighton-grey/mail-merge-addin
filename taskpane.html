@@ -82,7 +82,7 @@
     <!-- Tab: Recipients -->
     <div id="tab-recipients" class="tab-pane">
 
-      <!-- Getting started banner (Feature 13) -->
+          <!-- Getting started banner — hidden by default, shown via JS when CSV is empty -->
       <div id="gettingStartedBanner" class="getting-started-banner hidden">
         <div style="font-weight:600;margin-bottom:4px;">Welcome to Mail Merge</div>
         <ol style="margin:4px 0 8px 16px;padding:0;font-size:12px;line-height:1.7;">
@@ -105,7 +105,7 @@
         </div>
       </div>
 
-      <!-- Quick email entry mode (hidden by default) -->
+      <!-- Quick email entry mode — toggled by quickModeBtn, default hidden -->
       <div id="quickSection" class="section hidden">
         <label class="label">Type or paste email addresses</label>
         <textarea id="quickEmailInput" class="csv-area" style="height:90px;"
@@ -122,14 +122,16 @@
           <a id="downloadSampleCsv" href="#" class="btn-secondary btn-sample-csv" title="Download a ready-to-fill sample CSV with all supported columns">⬇ Sample file</a>
           <input type="file" id="csvFileInput" accept=".csv,.xlsx,.xls,text/csv" class="hidden" />
         </div>
-        <!-- Drag-and-drop zone wraps the textarea -->
+        <!-- Drag-and-drop zone — JS listens for dragenter/drop on csvDropZone to load CSV -->
         <div id="csvDropZone" class="csv-drop-zone">
           <textarea id="csvInput" class="csv-area"
             placeholder="email,first_name,last_name&#10;john@example.com,John,Smith&#10;&#10;💡 Drag a CSV or Excel file here, or paste a copied Excel table — it converts automatically."></textarea>
           <div class="csv-drop-hint">Drop CSV or Excel file here</div>
         </div>
         <div class="csv-actions">
+          <!-- Hidden until CSV is parsed; shown via JS to let user review data -->
           <button class="btn-secondary" id="previewBtn" style="display:none;">Preview</button>
+          <!-- Hidden until CSV parsed; triggers field mapping modal if columns don't match defaults -->
           <button class="btn-secondary" id="mapFieldsBtn" style="display:none;">⇄ Map fields</button>
           <span class="hint csv-col-hint" style="flex:1;margin:0;font-size:10px;">
             Required: <code>email</code> <code>first_name</code> <code>last_name</code>.
@@ -142,7 +144,7 @@
         </div>
       </div>
 
-      <!-- Filter / sort bar (shown after CSV is parsed) -->
+      <!-- Filter / sort bar — hidden by default; shown after CSV is parsed via setFilterSortVisible() -->
       <div id="filterSortBar" class="section hidden">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
           <strong style="font-size:11px;">Filter</strong>
@@ -163,15 +165,19 @@
         <div id="filterConditions"></div>
       </div>
 
+      <!-- Preview table — populated by previewTableInit(), shown after CSV parse via JS -->
       <div id="previewTable" class="section hidden"></div>
 
-      <!-- Suppression -->
+      <!-- Suppression list section -->
       <div class="section">
         <label class="label">Suppression list <span class="hint-inline">(do not contact)</span></label>
         <div class="attachment-row">
           <button class="btn-secondary" id="uploadSuppressionBtn">🚫 Load list</button>
+          <!-- Hidden file input; opened by uploadSuppressionBtn -->
           <input type="file" id="suppressionFileInput" accept=".csv,.txt,text/plain,text/csv" class="hidden" />
+          <!-- Shows filename or "None loaded"; updated by loadSuppressionFile() -->
           <span id="suppressionLabel" class="attachment-label">None loaded</span>
+          <!-- Hidden until suppression list is loaded -->
           <button class="btn-icon hidden" id="clearSuppressionBtn" title="Clear suppression list">✕</button>
         </div>
         <p class="hint">Upload a .csv or .txt file with one email address per line. Any address in this list will be silently skipped during the merge.</p>
@@ -183,8 +189,11 @@
         <p class="sublabel">Shared <span class="hint-inline">(all recipients)</span></p>
         <div class="attachment-row">
           <button class="btn-secondary" id="uploadAttachmentBtn">📎 Add files</button>
+          <!-- Hidden file input; opened by uploadAttachmentBtn -->
           <input type="file" id="attachmentFileInput" multiple class="hidden" />
+          <!-- Shows count of loaded files; updated by loadSharedAttachments() -->
           <span id="attachmentLabel" class="attachment-label">None</span>
+          <!-- Hidden until shared attachments loaded -->
           <button class="btn-icon hidden" id="clearSharedAttachmentsBtn" title="Clear all attachments">✕</button>
         </div>
         <p class="hint">Max 3 MB per file.</p>
@@ -193,8 +202,11 @@
           <p class="sublabel">Per-recipient <span class="hint-inline">(matched by filename)</span></p>
           <div class="attachment-row">
             <button class="btn-secondary" id="uploadPerRecipientBtn">📁 Load files</button>
+            <!-- Hidden file input; opened by uploadPerRecipientBtn -->
             <input type="file" id="perRecipientFilesInput" multiple class="hidden" />
+            <!-- Shows count; updated by loadPerRecipientFiles() -->
             <span id="perRecipientLabel" class="attachment-label">None loaded</span>
+            <!-- Hidden until per-recipient files loaded -->
             <button class="btn-icon hidden" id="clearPerRecipientBtn" title="Clear all">✕</button>
           </div>
           <p class="hint">Add <code>attachment</code> column to CSV with exact filename. Falls back to shared if no match.</p>
@@ -204,8 +216,11 @@
           <p class="sublabel">Inline images <span class="hint-inline">(CID-embedded)</span></p>
           <div class="attachment-row">
             <button class="btn-secondary" id="uploadInlineImagesBtn">🖼 Load images</button>
+            <!-- Hidden file input; opened by uploadInlineImagesBtn -->
             <input type="file" id="inlineImagesInput" multiple accept="image/*" class="hidden" />
+            <!-- Shows count; updated by loadInlineImages() -->
             <span id="inlineImagesLabel" class="attachment-label">None loaded</span>
+            <!-- Hidden until inline images loaded -->
             <button class="btn-icon hidden" id="clearInlineImagesBtn" title="Clear inline images">✕</button>
           </div>
           <p class="hint">Reference in HTML body as <code>&lt;img src="cid:filename.png"&gt;</code>.</p>
@@ -267,14 +282,10 @@
           </div>
         </div>
 
-        <!-- #tagBar — the chip container. JS dynamically appends CSV-column
-             chips and custom chips here after the default chips below.
-             Default (built-in) chips: plain column name placeholders.
-             Smart chips (.tag-smart): computed values like today's date. -->
+        <!-- #tagBar — chip container; JS dynamically appends CSV columns + custom tags after defaults.
+             Default chips are never removable. Smart chips (.tag-smart) are computed values. -->
         <div id="tagBar" class="tag-bar">
-          <!-- Default column-name chips — listed in DEFAULT_TAGS[] in JS.
-               These are never removable. Each chip contains a .tag-label
-               span so the inner structure matches JS-generated chips. -->
+          <!-- data-tag holds the token to insert; tabindex & role make it keyboard/screen-reader accessible -->
           <span class="tag" data-tag="{{first_name}}" tabindex="0" role="button" aria-label="Insert first_name token"><span class="tag-label">{{first_name}}</span></span>
           <span class="tag" data-tag="{{last_name}}"  tabindex="0" role="button" aria-label="Insert last_name token"><span class="tag-label">{{last_name}}</span></span>
           <span class="tag" data-tag="{{email}}"      tabindex="0" role="button" aria-label="Insert email token"><span class="tag-label">{{email}}</span></span>
@@ -377,18 +388,21 @@
           </select>
         </div>
 
-        <!-- Scheduling accordion -->
+        <!-- Scheduling accordion — collapsible; JS toggles #accordion-scheduling visibility on data-accordion match -->
         <div class="accordion" style="margin-top:10px;">
           <button class="accordion-hdr" data-accordion="scheduling">
             <span>Scheduling</span>
+            <!-- Hidden by default; shown by updateSchedulingBadge() when scheduling is enabled -->
             <span id="schedulingActiveBadge" class="hidden" style="font-size:10px;background:#0078d4;color:#fff;border-radius:8px;padding:1px 6px;margin-left:6px;">ON</span>
             <span class="accordion-chevron">›</span>
           </button>
+          <!-- Hidden accordion body; shown by JS when accordion-hdr is clicked -->
           <div id="accordion-scheduling" class="accordion-body hidden">
             <label class="checkbox-label">
               <input type="checkbox" id="scheduleEnabled" />
               Schedule send
             </label>
+            <!-- Hidden until scheduleEnabled checkbox is checked -->
             <div id="scheduleRow" class="hidden schedule-row" style="margin-top:6px;">
               <input type="datetime-local" id="scheduledTime" class="input" />
               <p class="hint">Exchange deferred delivery — sends even if Outlook is closed. Requires <code>Mail.ReadWrite</code> on the Entra app registration.</p>
@@ -397,6 +411,7 @@
               <input type="checkbox" id="expiryEnabled" />
               Set message expiry date
             </label>
+            <!-- Hidden until expiryEnabled checkbox is checked -->
             <div id="expiryRow" class="hidden schedule-row" style="margin-top:6px;">
               <input type="datetime-local" id="expiryDateTimeInput" class="input" />
               <p class="hint">Message will expire (become undeliverable) after this date.</p>
@@ -406,6 +421,7 @@
                 <input type="checkbox" id="sendingWindowEnabled"> Restrict sends to business hours
               </label>
             </div>
+            <!-- Hidden until sendingWindowEnabled is checked -->
             <div id="sendingWindowRow" class="schedule-row hidden" style="margin-top:6px;">
               <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px;">
                 <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Start <input type="time" id="windowStart" value="09:00"></label>
@@ -416,10 +432,11 @@
           </div>
         </div>
 
-        <!-- Advanced accordion -->
+        <!-- Advanced accordion — rate limiting, headers, send-as, etc. -->
         <div class="accordion">
           <button class="accordion-hdr" data-accordion="advanced">
             <span>Advanced</span>
+            <!-- Hidden by default; shown by updateRateLimitBadge() when rate limit is set -->
             <span id="rateLimitActiveBadge" class="hidden" style="font-size:10px;background:#0078d4;color:#fff;border-radius:8px;padding:1px 6px;margin-left:6px;">RATE LIMIT</span>
             <span class="accordion-chevron">›</span>
           </button>
@@ -437,6 +454,7 @@
               <input type="checkbox" id="customHeadersEnabled" />
               Custom X- headers
             </label>
+            <!-- Hidden until customHeadersEnabled is checked -->
             <div id="customHeadersRow" class="hidden schedule-row">
               <textarea id="customHeadersInput" class="csv-area" style="height:52px;"
                 placeholder="X-Campaign: june-newsletter&#10;X-Mailer: MailMerge"></textarea>
@@ -544,10 +562,7 @@
        ─────────────────────────────────────────────────────────── -->
   <div class="app-footer">
 
-    <!-- Progress bar — hidden (.hidden class) until a merge starts.
-         JS removes .hidden and updates #progressFill width% and
-         #progressLabel text as emails are dispatched.
-         ARIA progressbar role + aria-valuenow make this accessible. -->
+    <!-- Progress bar — hidden by default; shown by setMergeRunning(true), width/text updated per batch -->
     <div id="progressContainer" class="progress-container hidden" style="margin-bottom:6px;">
       <div id="progressFill" class="progress-fill"
            role="progressbar"
@@ -558,10 +573,7 @@
       <span id="progressLabel" class="progress-label">0%</span>
     </div>
 
-    <!-- Step 1 — test send strip (always visible in footer).
-         Orange-branded row encouraging users to send a test email
-         to themselves before running the full merge. The <select>
-         lets them pick which recipient row to use for the test. -->
+    <!-- Step 1 — test send strip; encouraging users to verify before full merge -->
     <div class="footer-step1-row">
       <span class="step1-label">Step 1 — Test</span>
       <div style="display:flex;gap:5px;align-items:center;margin-left:auto;flex-shrink:0;">
@@ -573,11 +585,7 @@
       <button id="testSendBtn" class="btn-step1">📨 Send test to myself</button>
     </div>
 
-    <!-- Action buttons — split into two explicit sub-rows to prevent
-         wrapping in the narrow ~320px taskpane viewport.
-         Row 1 (.merge-actions-secondary): 4 equal-width utility buttons
-         Row 2 (.merge-actions-primary):   full-width CTA + optional Stop
-         CSS (.merge-actions) stacks them vertically with a column layout. -->
+    <!-- Action buttons — two rows: secondary (4 equal utilities) + primary (full-width CTA + Stop) -->
     <div class="merge-actions">
 
       <!-- Secondary actions row: Preview / Simulate / Drafts / Broadcast.
@@ -590,19 +598,20 @@
         <button id="broadcastBtn" class="btn-preview">📢 Broadcast</button>
       </div>
 
-      <!-- Primary action row: Run mail merge (fills width).
-           Stop button is hidden by default; JS reveals it once a merge starts
-           and hides mergeBtn, giving the user a way to abort mid-run. -->
+      <!-- Primary action row — merge button shown by default, stop button hidden until merge starts -->
       <div class="merge-actions-row merge-actions-primary">
         <button id="mergeBtn" class="btn-primary">▶ Run mail merge</button>
+        <!-- Hidden by default; shown by setMergeRunning(true) while merge is in progress -->
         <button id="stopBtn" class="btn-danger hidden">⏹ Stop</button>
       </div>
 
     </div>
 
-    <!-- Retry / report buttons (hidden until merge completes) -->
+    <!-- Retry / report buttons — hidden by default; shown after merge completes -->
     <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+      <!-- Retry button — hidden until merge ends with failures; text set by showRetryButton() -->
       <button id="retryFailedBtn"    class="btn-secondary hidden"></button>
+      <!-- Hidden until merge completes -->
       <button id="downloadReportBtn" class="btn-secondary hidden">📊 Download report</button>
     </div>
     <!-- Log toggle — centered -->
@@ -611,12 +620,10 @@
               style="white-space:nowrap;font-size:11px;padding:2px 12px;">Log ↕</button>
     </div>
 
-    <!-- Mini log strip — hidden by default, shown when Log ↕ is toggled -->
+    <!-- Mini log strip — hidden by default; shown when Log ↕ is toggled -->
     <div id="footerLogMini" class="footer-log-mini hidden" style="margin-top:3px;"></div>
 
-    <!-- Full scrollable log — hidden by default, shown when user
-         clicks the "Log ↕" toggle button above. Contains the complete
-         chronological output of all send operations.               -->
+    <!-- Full log area — hidden by default; shown/hidden by toggleLogBtn; contains chronological send output -->
     <div id="fullLogArea" class="hidden" style="margin-top:6px;">
       <div id="statusLog" class="status-log">
         <p class="log-entry log-info">Ready. Load a CSV file or paste data, then click "Run mail merge".</p>
@@ -629,7 +636,7 @@
 
   </div><!-- /app-footer -->
 
-  <!-- Preview all modal -->
+  <!-- Preview all modal — hidden by default; shown by previewAllBtn; let user browse all merged emails -->
   <div id="previewModal" class="modal-overlay hidden">
     <div class="modal modal-preview" role="dialog" aria-modal="true" aria-labelledby="previewCounter">
       <div class="preview-modal-header">
@@ -647,7 +654,7 @@
     </div>
   </div>
 
-  <!-- Confirmation modal -->
+  <!-- Confirmation modal — shown before sending; prompts user to confirm merge -->
   <div id="confirmModal" class="modal-overlay hidden">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmModalTitle">
       <p id="confirmModalTitle" class="modal-title">Ready to send?</p>
@@ -659,10 +666,12 @@
     </div>
   </div>
 
-  <!-- Contacts picker modal -->
+  <!-- Contacts picker modal — hidden by default; shown by importContactsBtn; tabbed interface (Contacts/Groups/Directory) -->
   <div id="contactsModal" class="modal-overlay hidden">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="contactsModalTitle" style="width:320px;max-height:480px;display:flex;flex-direction:column;">
+      <!-- Screen-reader only title for aria-labelledby -->
       <span id="contactsModalTitle" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;">Contacts Picker</span>
+      <!-- Tab navigation — JS toggles visibility of #contactsList / #groupsList / #directoryList on tab click -->
       <div style="display:flex;gap:0;margin-bottom:8px;border-bottom:1px solid #edebe9;">
         <button class="tab-btn active" id="contactsTabContacts" style="flex:none;padding:6px 12px;font-size:12px;">Contacts</button>
         <button class="tab-btn" id="contactsTabGroups" style="flex:none;padding:6px 12px;font-size:12px;">Groups</button>
@@ -670,12 +679,16 @@
         <div style="flex:1;"></div>
         <button class="btn-icon" id="contactsCloseBtn">✕</button>
       </div>
+      <!-- Directory search row — hidden by default; shown when Directory tab is active -->
       <div id="directorySearchRow" style="display:none;margin-bottom:8px;">
         <input type="text" id="directorySearch" class="input" placeholder="Search company directory…" />
       </div>
       <input type="text" id="contactsSearch" class="input" placeholder="Search name or email…" style="margin-bottom:8px;" />
+      <!-- Contacts list — shown by default; populated by loadContactsList() -->
       <div id="contactsList" style="flex:1;overflow-y:auto;font-size:12px;border:1px solid #edebe9;border-radius:4px;"></div>
+      <!-- Groups list — hidden by default; shown when Groups tab is active -->
       <div id="groupsList" style="flex:1;overflow-y:auto;font-size:12px;border:1px solid #edebe9;border-radius:4px;display:none;"></div>
+      <!-- Directory list — hidden by default; shown when Directory tab is active -->
       <div id="directoryList" style="flex:1;overflow-y:auto;font-size:12px;border:1px solid #edebe9;border-radius:4px;display:none;"></div>
       <div style="margin-top:8px;display:flex;gap:6px;justify-content:flex-end;">
         <span id="contactsSelectedCount" style="font-size:11px;color:#605e5c;align-self:center;flex:1;"></span>
@@ -685,7 +698,7 @@
     </div>
   </div>
 
-  <!-- Match Fields modal -->
+  <!-- Match Fields modal — shown by mapFieldsBtn; let user remap CSV columns to expected fields -->
   <div id="matchFieldsModal" class="modal-overlay hidden">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="matchFieldsModalTitle" style="width:340px;max-height:500px;display:flex;flex-direction:column;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
@@ -701,7 +714,7 @@
     </div>
   </div>
 
-  <!-- Check for Errors modal -->
+  <!-- Check for Errors modal — shown by checkErrorsBtn; displays validation errors before merge -->
   <div id="checkErrorsModal" class="modal-overlay hidden">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="checkErrorsModalTitle" style="width:360px;max-height:520px;display:flex;flex-direction:column;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
@@ -712,7 +725,7 @@
     </div>
   </div>
 
-  <!-- Duplicate send warning modal -->
+  <!-- Duplicate send warning modal — shown if same merge detected within 30-day window -->
   <div id="dupeSendModal" class="modal-overlay hidden">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dupeSendModalTitle">
       <p id="dupeSendModalTitle" class="modal-title">⚠ Recent send detected</p>
@@ -724,7 +737,7 @@
     </div>
   </div>
 
-  <!-- Fill-in values modal (Feature 6) -->
+  <!-- Fill-in values modal — shown if template has {{fill_me}} tokens; user must complete before sending -->
   <div class="modal-overlay hidden" id="fillInModal">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="fillInModalTitle" style="min-width:340px;max-width:480px;">
       <h3 id="fillInModalTitle" style="margin:0 0 12px">Fill In Values</h3>
@@ -737,7 +750,7 @@
     </div>
   </div>
 
-  <!-- Pre-send confirmation modal (Feature C) -->
+  <!-- Pre-send confirmation modal — final confirmation before merge starts; shows recipient count & settings -->
   <div class="modal-overlay hidden" id="preSendModal">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="preSendModalTitle" style="min-width:320px;max-width:440px;">
       <h3 id="preSendModalTitle" style="margin:0 0 12px">Ready to Send</h3>
@@ -749,7 +762,7 @@
     </div>
   </div>
 
-  <!-- Edit recipient table modal -->
+  <!-- Edit recipient table modal — shown by previewBtn; click cells to inline edit or add columns -->
   <div id="editTableModal" class="modal-overlay hidden">
     <div class="modal modal-edit-table" role="dialog" aria-modal="true" aria-labelledby="editTableModalTitle">
       <div class="edit-table-modal-header">
@@ -768,10 +781,10 @@
     </div>
   </div>
 
-  <!-- Toast notification container (populated by showToast() in taskpane.js) -->
+  <!-- Toast notification container — aria-live announces messages to screen readers; populated by showToast() -->
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="false"></div>
 
-  <!-- Core engine -->
+  <!-- Core engine — taskpane.js initializes Office.js, attaches event listeners, and manages state -->
   <script src="taskpane.js?v=2.6.0" type="text/javascript"></script>
 </body>
 </html>
