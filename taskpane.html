@@ -144,25 +144,48 @@
         </div>
       </div>
 
-      <!-- Filter / sort bar — hidden by default; shown after CSV is parsed via setFilterSortVisible() -->
-      <div id="filterSortBar" class="section hidden">
-        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
-          <strong style="font-size:11px;">Filter</strong>
-          <select id="filterLogic" class="select-inline" style="min-width:55px;">
-            <option value="AND">AND</option>
-            <option value="OR">OR</option>
-          </select>
-          <button class="btn-secondary" id="addFilterCondBtn" style="font-size:11px;padding:2px 8px;">+ Condition</button>
-          <select id="sortCol" class="select-inline" style="min-width:90px;"><option value="">Sort col…</option></select>
-          <select id="sortDir" class="select-inline" style="min-width:60px;">
-            <option value="asc">A→Z</option>
-            <option value="desc">Z→A</option>
-          </select>
-          <button class="btn-secondary" id="applyFilterBtn">Apply</button>
-          <button class="btn-secondary" id="clearFilterBtn">Clear</button>
-          <span id="filterCountLabel" class="hint-inline"></span>
+      <!-- Filter popup overlay — triggered by the Filter button inside the preview table header.
+           Hidden by default; openFilterPopup() removes .hidden to show it.
+           All the same filter controls live here — just presented as a popup panel
+           rather than an always-visible section card.                              -->
+      <div id="filterPopup" class="filter-popup hidden" role="dialog" aria-modal="true" aria-label="Filter and sort recipients">
+        <!-- Semi-transparent backdrop — clicking it closes the popup -->
+        <div class="filter-popup-backdrop" id="filterPopupBackdrop"></div>
+        <div class="filter-popup-panel">
+          <!-- Header: title + close button -->
+          <div class="filter-popup-header">
+            <strong style="font-size:12px;">Filter &amp; Sort</strong>
+            <button class="filter-popup-close" id="closeFilterPopupBtn" aria-label="Close filter popup">✕</button>
+          </div>
+          <div class="filter-popup-body">
+            <!-- Logic operator: AND = all conditions must match; OR = any one matches -->
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
+              <strong style="font-size:11px;">Logic</strong>
+              <select id="filterLogic" class="select-inline" style="min-width:55px;">
+                <option value="AND">AND</option>
+                <option value="OR">OR</option>
+              </select>
+              <button class="btn-secondary" id="addFilterCondBtn" style="font-size:11px;padding:2px 8px;">+ Condition</button>
+            </div>
+            <!-- Condition rows injected here by addFilterCondition() -->
+            <div id="filterConditions"></div>
+            <!-- Sort controls -->
+            <div style="display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;">
+              <strong style="font-size:11px;">Sort</strong>
+              <select id="sortCol" class="select-inline" style="min-width:90px;"><option value="">col…</option></select>
+              <select id="sortDir" class="select-inline" style="min-width:60px;">
+                <option value="asc">A→Z</option>
+                <option value="desc">Z→A</option>
+              </select>
+            </div>
+            <!-- Apply / Clear + row count feedback -->
+            <div style="display:flex;align-items:center;gap:6px;margin-top:10px;flex-wrap:wrap;">
+              <button class="btn-secondary" id="applyFilterBtn">Apply</button>
+              <button class="btn-secondary" id="clearFilterBtn">Clear</button>
+              <span id="filterCountLabel" class="hint-inline"></span>
+            </div>
+          </div>
         </div>
-        <div id="filterConditions"></div>
       </div>
 
       <!-- Preview table — populated by previewTableInit(), shown after CSV parse via JS -->
@@ -295,29 +318,46 @@
           <span class="tag tag-smart" data-tag="{{greeting_line}}" tabindex="0" role="button" aria-label="Insert greeting_line token"><span class="tag-label">{{greeting_line}}</span></span>
           <span class="tag tag-smart" data-tag="{{today}}"         tabindex="0" role="button" aria-label="Insert today token"><span class="tag-label">{{today}}</span></span>
           <span class="tag tag-smart" data-tag="{{now}}"           tabindex="0" role="button" aria-label="Insert now token"><span class="tag-label">{{now}}</span></span>
+          <!-- New line button — clicking a tag chip moves focus to the taskpane so the user
+               can't press Enter in the Outlook body to create a new line. This button calls
+               insertNewline() which sends a line-break character via setSelectedDataAsync,
+               letting the user build multi-line templates without switching windows. -->
+          <span class="tag tag-newline" id="insertNewlineBtn" tabindex="0" role="button" aria-label="Insert new line into body" title="Insert a new line (↵) at cursor in body"><span class="tag-label">↵ New line</span></span>
         </div>
 
-        <!-- Advanced: greeting format + custom tags (collapsed) -->
+        <!-- Advanced: greeting format (collapsed) -->
         <details class="hint-advanced">
-          <summary class="hint-advanced-toggle">Greeting format &amp; custom tags</summary>
+          <summary class="hint-advanced-toggle">Greeting format</summary>
           <div class="hint-advanced-body">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
               <span class="hint-inline">{{greeting_line}} format</span>
+              <!-- Preset formats cover the common cases. "Custom template…" lets users
+                   write their own greeting using any CSV column — e.g. {{title}} {{last_name}}
+                   for a CSV that has a title column (Mr., Mrs., Dr., etc.)              -->
               <select id="greetingFormat" class="select-inline">
                 <option value="dear_sal_last">Dear [Sal] [Last]</option>
                 <option value="dear_first">Dear [First]</option>
                 <option value="dear_first_last">Dear [First] [Last]</option>
                 <option value="hi_first">Hi [First]</option>
                 <option value="to_sal_last">To [Sal] [Last]</option>
+                <option value="custom">Custom template…</option>
               </select>
               <input type="text" id="greetingFallback" class="input input-inline"
                 placeholder="Fallback e.g. Dear Valued Customer" style="max-width:160px;" />
             </div>
-            <p class="hint">Generates "Dear Mr. Smith" from <code>salutation</code>, <code>first_name</code>, <code>last_name</code>, <code>gender</code> columns.</p>
-            <div class="custom-tag-row" style="margin-top:10px;">
-              <input type="text" id="customTagInput" class="input input-inline" placeholder="custom_field_name" />
-              <button class="btn-secondary" id="addCustomTagBtn">+ Add tag</button>
+            <!-- Custom template input — shown only when "Custom template…" is selected.
+                 Supports any {{column_name}} token from the loaded CSV.
+                 Example: "Dear {{title}} {{last_name}}," or "Hello {{first_name}}!" -->
+            <div id="greetingCustomWrap" class="hidden" style="margin-bottom:6px;">
+              <input type="text" id="greetingCustomTemplate" class="input"
+                placeholder="e.g. Dear {{title}} {{last_name}}," />
+              <p class="hint" style="margin-top:4px;">Use any <code>{{column_name}}</code> from your CSV — e.g. <code>{{title}}</code> for Mr./Mrs./Dr.</p>
             </div>
+            <p class="hint">
+              Preset formats use <code>salutation</code>, <code>first_name</code>, <code>last_name</code> columns.
+              Choose <em>Custom template…</em> to use any column (e.g. a <code>title</code> column for Mr./Mrs./Dr.).
+              The fallback is used when name fields are empty.
+            </p>
           </div>
         </details>
       </div>

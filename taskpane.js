@@ -411,7 +411,7 @@ let fieldMapping = {}; // { canonicalName: csvColumnName }
 // the predefined greeting patterns (e.g. "dear_sal_last" → "Dear Mr Smith"),
 // and `fallback` is used when the required name fields are missing.
 // Persisted to localStorage under LS_KEY_GREETING.
-let greetingConfig = { format: "dear_sal_last", fallback: "Dear Valued Customer" };
+let greetingConfig = { format: "dear_sal_last", fallback: "Dear Valued Customer", customTemplate: "" };
 
 // draftsMode: when true, buildEmailRequest() changes the Graph endpoint from
 // /sendMail to /messages (creates a draft) instead of sending immediately.
@@ -742,9 +742,6 @@ Office.onReady((info) => {
     // ── Log controls ──────────────────────────────────────────────────────
     document.getElementById("clearLogBtn").addEventListener("click", clearLog);
 
-    // ── Tag chips ─────────────────────────────────────────────────────────
-    document.getElementById("addCustomTagBtn").addEventListener("click", addCustomTag);
-
     // ── Confirmation modal ─────────────────────────────────────────────────
     // The modal has two exit paths: confirm (proceed with send) and cancel.
     // confirmSend() is the real merge trigger — handleMergeClick() just opens
@@ -935,9 +932,12 @@ Office.onReady((info) => {
       applyTagTarget("subject");
     });
 
-    document.getElementById("customTagInput").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") addCustomTag();
-    });
+    // ── New line button in tag bar ─────────────────────────────────────────
+    // Inserts a line break into the Outlook body from the taskpane, so the
+    // user doesn't have to click back into the body just to press Enter between
+    // consecutive tag insertions.
+    const newlineBtn = document.getElementById("insertNewlineBtn");
+    if (newlineBtn) newlineBtn.addEventListener("click", insertNewline);
 
     // ── Subject input — localStorage sync + Outlook push ──────────────────
     // Every keystroke: save to localStorage immediately (so it survives
@@ -1031,9 +1031,14 @@ Office.onReady((info) => {
       else importSelectedContacts();
     });
 
-    // ── Recipient filter / sort bar ────────────────────────────────────────
+    // ── Recipient filter popup ─────────────────────────────────────────────
+    // Apply and Clear buttons live inside the popup; both close it when done.
     document.getElementById("applyFilterBtn").addEventListener("click", applyFilterSort);
     document.getElementById("clearFilterBtn").addEventListener("click", clearFilterSort);
+    // Close button (✕) in the popup header — just hides the popup, no filter change.
+    document.getElementById("closeFilterPopupBtn").addEventListener("click", closeFilterPopup);
+    // Clicking the backdrop (outside the panel) also closes the popup.
+    document.getElementById("filterPopupBackdrop").addEventListener("click", closeFilterPopup);
 
     // ── Match Fields modal ─────────────────────────────────────────────────
     // Opens a dialog that maps the user's CSV column names to the canonical
@@ -1059,15 +1064,25 @@ Office.onReady((info) => {
     // ── Greeting-line configuration ────────────────────────────────────────
     // Persist the greeting config to localStorage on every change so it
     // survives page refreshes. The "change" event is used for the select
-    // (fires when the user picks an option) and "input" for the text field.
+    // (fires when the user picks an option) and "input" for the text fields.
     document.getElementById("greetingFormat").addEventListener("change", () => {
       greetingConfig.format = document.getElementById("greetingFormat").value;
+      // Show the custom template input only when "Custom template…" is selected.
+      // Hidden for all preset formats since they use fixed column mappings.
+      const isCustom = greetingConfig.format === "custom";
+      document.getElementById("greetingCustomWrap").classList.toggle("hidden", !isCustom);
       lsSet(LS_KEY_GREETING, JSON.stringify(greetingConfig));
     });
     document.getElementById("greetingFallback").addEventListener("input", () => {
       // Fall back to the default string rather than saving an empty fallback,
       // which would result in blank greeting lines for recipients missing names.
       greetingConfig.fallback = document.getElementById("greetingFallback").value.trim() || "Dear Valued Customer";
+      lsSet(LS_KEY_GREETING, JSON.stringify(greetingConfig));
+    });
+    // Custom greeting template — free-text field shown when format === "custom".
+    // Supports any {{column}} token from the loaded CSV, e.g. "Dear {{title}} {{last_name}},"
+    document.getElementById("greetingCustomTemplate").addEventListener("input", () => {
+      greetingConfig.customTemplate = document.getElementById("greetingCustomTemplate").value;
       lsSet(LS_KEY_GREETING, JSON.stringify(greetingConfig));
     });
 
@@ -1805,9 +1820,12 @@ function restoreLocalState() {
   if (savedGreeting) {
     try {
       const g = typeof savedGreeting === "object" ? savedGreeting : JSON.parse(savedGreeting);
-      greetingConfig = g;
-      document.getElementById("greetingFormat").value   = g.format   || "dear_sal_last";
-      document.getElementById("greetingFallback").value = g.fallback || "Dear Valued Customer";
+      greetingConfig = { customTemplate: "", ...g }; // ensure customTemplate always exists
+      document.getElementById("greetingFormat").value          = g.format         || "dear_sal_last";
+      document.getElementById("greetingFallback").value        = g.fallback       || "Dear Valued Customer";
+      document.getElementById("greetingCustomTemplate").value  = g.customTemplate || "";
+      // Show custom template input if the saved format was "custom".
+      document.getElementById("greetingCustomWrap").classList.toggle("hidden", g.format !== "custom");
     } catch { /* ignore malformed stored data */ }
   }
 }
@@ -2901,6 +2919,39 @@ function insertTag(tag, forceSubject = false) {
 }
 
 /**
+ * insertNewline() — insert a line break into the Outlook compose body from the taskpane.
+ *
+ * Clicking a tag chip moves focus to the taskpane iframe, which means the user
+ * can't press Enter to create a new line in the body without clicking back there.
+ * This function provides a "↵ New line" button in the tag bar as a workaround:
+ * it calls setSelectedDataAsync with a newline character so the user can build
+ * multi-line templates entirely from the taskpane without switching focus.
+ *
+ * Mac (Text coercion): "\n" creates a line break in plain-text mode.
+ * Windows (Html coercion): "<br>" creates a line break in HTML mode.
+ */
+function insertNewline() {
+  // Only makes sense when target is the body — ignore if subject is active.
+  if (tagTarget === "subject" || subjectHasFocus) {
+    showToast("Switch to Body mode to insert a new line.", "warning", 2000);
+    return;
+  }
+  const isMac = Office.context.platform === Office.PlatformType.Mac;
+  const newlineChar = isMac ? "\n" : "<br>";
+  const coercionType = isMac ? Office.CoercionType.Text : Office.CoercionType.Html;
+  Office.context.mailbox.item.body.setSelectedDataAsync(
+    newlineChar,
+    { coercionType },
+    (result) => {
+      if (result.status !== Office.AsyncResultStatus.Succeeded) {
+        log(`Failed to insert newline into body: ${result.error.message}`, "error");
+      }
+      // No toast for newline — it's a silent action; the visual result in the body is feedback enough.
+    }
+  );
+}
+
+/**
  * Read the value from #customTagInput, normalise it into a {{tag}} format,
  * add it to the tag bar as a custom chip, and immediately insert it into
  * the currently focused field (body or subject line).
@@ -3563,10 +3614,12 @@ let filterConditionCount = 0;
 function populateFilterSortBar(headers) {
   const sortCol = document.getElementById("sortCol");
   // Build all options then assign once — avoids repeated innerHTML += reparse on each iteration.
-  sortCol.innerHTML = '<option value="">Sort col…</option>' +
+  sortCol.innerHTML = '<option value="">col…</option>' +
     headers.map(h => `<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`).join("");
-  document.getElementById("filterSortBar").classList.remove("hidden");
-  // Ensure at least one blank condition row is visible when the bar opens.
+  // NOTE: The filter controls now live inside #filterPopup (a popup overlay) rather
+  // than the old #filterSortBar section. The popup is accessible via the Filter
+  // button inside the preview table header — no need to show a separate bar here.
+  // Ensure at least one blank condition row is ready when the popup first opens.
   if (document.getElementById("filterConditions").children.length === 0) {
     addFilterCondition();
   }
@@ -3729,6 +3782,9 @@ function applyFilterSort() {
   // an empty filter object (getFilteredSortedRecipients() checks for null).
   activeFilter  = (conditions.length || sortCol) ? { conditions, sortCol, sortDir, logic } : null;
   renderFilteredPreview();
+  // Close the popup once the filter is applied — the preview table re-renders
+  // with the dot indicator showing that a filter is active.
+  closeFilterPopup();
 }
 
 /**
@@ -3747,6 +3803,37 @@ function clearFilterSort() {
   document.getElementById("filterLogic").value = "AND";
   document.getElementById("filterCountLabel").textContent = "";
   renderFilteredPreview();
+  // Close the popup after clearing — the table re-renders without the active dot.
+  closeFilterPopup();
+}
+
+/**
+ * openFilterPopup() — show the #filterPopup overlay.
+ * Removes the .hidden class and adds a keydown listener for Escape to close.
+ */
+function openFilterPopup() {
+  const popup = document.getElementById("filterPopup");
+  if (!popup) return;
+  popup.classList.remove("hidden");
+  // Trap Escape key to close the popup — accessibility best practice for dialogs.
+  document._filterPopupEscHandler = function(e) {
+    if (e.key === "Escape") closeFilterPopup();
+  };
+  document.addEventListener("keydown", document._filterPopupEscHandler);
+}
+
+/**
+ * closeFilterPopup() — hide the #filterPopup overlay.
+ * Adds the .hidden class back and cleans up the Escape listener.
+ */
+function closeFilterPopup() {
+  const popup = document.getElementById("filterPopup");
+  if (!popup) return;
+  popup.classList.add("hidden");
+  if (document._filterPopupEscHandler) {
+    document.removeEventListener("keydown", document._filterPopupEscHandler);
+    document._filterPopupEscHandler = null;
+  }
 }
 
 /**
@@ -3924,9 +4011,14 @@ function renderPreviewTable(rows) {
 
   // Filter out internal "_"-prefixed keys so they don't appear as table columns.
   const headers = Object.keys(rows[0]).filter(h => !h.startsWith("_"));
-  let html = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
+  // Build the preview header: title label + Edit table button + Filter button.
+  // The filter button shows an orange dot (●) when a filter is currently active
+  // so users can see at a glance that the table is filtered.
+  const filterActiveIndicator = activeFilter ? ' <span class="filter-active-dot" title="Filter active">●</span>' : '';
+  let html = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap;">' +
     '<label class="label" style="margin:0;">Preview (rows ' + (previewTablePage * PREVIEW_PAGE_SIZE + 1) + '–' + Math.min((previewTablePage + 1) * PREVIEW_PAGE_SIZE, rows.length) + ' of ' + rows.length + ')</label>' +
     '<button class="btn-secondary btn-edit-table" id="openEditTableBtn">✏ Edit table</button>' +
+    '<button class="btn-filter-popup" id="openFilterBtn" title="Filter and sort recipients">⊞ Filter' + filterActiveIndicator + '</button>' +
     '</div>';
   html += '<table class="preview-table"><thead><tr>';
   // "Select all" header checkbox — toggles all visible row checkboxes.
@@ -3977,6 +4069,12 @@ function renderPreviewTable(rows) {
   // ── Wire "Edit table" button ───────────────────────────────────────────
   const openEditBtn = document.getElementById("openEditTableBtn");
   if (openEditBtn) openEditBtn.addEventListener("click", openEditTableModal);
+
+  // ── Wire "Filter" button ───────────────────────────────────────────────
+  // Opens the #filterPopup overlay. The popup itself is always in the DOM;
+  // we just toggle .hidden to show/hide it.
+  const openFilterBtn = document.getElementById("openFilterBtn");
+  if (openFilterBtn) openFilterBtn.addEventListener("click", openFilterPopup);
 
   // ── Wire "Select all" header checkbox ─────────────────────────────────
   document.getElementById("selectAllRowsChk").addEventListener("change", function(e) {
@@ -4053,6 +4151,23 @@ function resolveGreetingLine(recipient) {
   const last  = String(recipient.last_name   || "").trim();
   const cfg   = greetingConfig;
   const fallback = cfg.fallback || "Dear Valued Customer";
+
+  // Custom template: user writes their own greeting using {{column}} tokens.
+  // Any column from the recipient row is available — e.g. "Dear {{title}} {{last_name}},"
+  // for a CSV with a title column containing Mr./Mrs./Dr. etc.
+  if (cfg.format === "custom") {
+    const tmpl = (cfg.customTemplate || "").trim();
+    if (!tmpl) return fallback;
+    // Replace {{col}} tokens with the matching field from recipient.
+    // recipient already has escaped values (or raw, depending on call site),
+    // so we just do a straightforward lookup — no additional escaping here.
+    const resolved = tmpl.replace(/\{\{(\w+)\}\}/gi, (_m, key) => {
+      const val = String(recipient[key.toLowerCase()] !== undefined && recipient[key.toLowerCase()] !== null
+        ? recipient[key.toLowerCase()] : "").trim();
+      return val;
+    }).trim();
+    return resolved || fallback;
+  }
 
   let parts = [];
   switch (cfg.format) {

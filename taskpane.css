@@ -730,6 +730,131 @@ body {
 /* Highlight the entire row on hover so users can track across columns */
 .preview-table tr:hover td { background: var(--accent-bg); }
 
+/* ─── Filter Popup Overlay ────────────────────────────────────────
+   The filter controls used to be a standalone section card (#filterSortBar).
+   They now live inside a popup overlay that the user opens via the
+   "⊞ Filter" button in the preview table header. This keeps the preview
+   table section clean and uncluttered until the user needs filtering.
+
+   Structure:
+     #filterPopup (.filter-popup)            — full-pane overlay container
+       .filter-popup-backdrop                — semi-transparent click-to-close layer
+       .filter-popup-panel                   — the visible card (z-index above backdrop)
+         .filter-popup-header                — title + ✕ close button
+         .filter-popup-body                  — filter controls
+   ─────────────────────────────────────────────────────────────── */
+
+/* Overlay: covers the entire task pane. position:fixed anchors it to the
+   viewport (not the scrollable content), so it always sits on top even
+   when the user has scrolled down the recipients tab.                     */
+.filter-popup {
+  position: fixed;
+  inset: 0;              /* top:0 right:0 bottom:0 left:0 — full coverage  */
+  z-index: 500;          /* above all section cards and the tab bar         */
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 80px;     /* push the panel down past the header + tab bar  */
+}
+
+/* Backdrop: fills the same fixed layer behind the panel.
+   Semi-opaque so users can still see what they're filtering.              */
+.filter-popup-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(31, 29, 58, 0.35); /* --brand-black with 35% opacity   */
+}
+
+/* Panel: the actual popup card that sits above the backdrop.              */
+.filter-popup-panel {
+  position: relative;    /* stacks above the absolute backdrop             */
+  z-index: 1;
+  background: var(--surface);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 28px rgba(91,82,200,0.18), 0 2px 8px rgba(0,0,0,0.10);
+  width: calc(100% - 32px);  /* full pane width minus 16px each side       */
+  max-width: 400px;
+  overflow: hidden;
+}
+
+/* Header bar: title on the left, close button on the right.              */
+.filter-popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);   /* slightly tinted background to frame the header */
+}
+
+/* Close button: icon-only, no border, sits flush in the header corner.   */
+.filter-popup-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  transition: color 0.15s, background 0.15s;
+}
+.filter-popup-close:hover { color: var(--danger); background: var(--danger-bg); }
+
+/* Body: padding around the filter controls.                               */
+.filter-popup-body { padding: 12px 14px 14px; }
+
+/* ─── Filter button in preview header ────────────────────────────
+   "⊞ Filter" button that opens the popup. Sits next to the "Edit table"
+   button (.btn-edit-table / .btn-secondary) but is styled differently:
+   no border, orange text to distinguish it from the purple Edit table.
+   ─────────────────────────────────────────────────────────────── */
+.btn-filter-popup {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--brand-orange);
+  padding: 3px 7px;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.btn-filter-popup:hover {
+  background: #FFF4E5;   /* warm cream — echoes the btn-secondary orange hover */
+  color: var(--brand-orange-dark);
+}
+
+/* Active-filter dot: small orange dot appended to the Filter button label
+   when activeFilter !== null, so users see at a glance the table is filtered. */
+.filter-active-dot {
+  color: var(--brand-orange);
+  font-size: 8px;
+  vertical-align: super;
+  margin-left: 2px;
+}
+
+/* ─── "↵ New line" tag chip ───────────────────────────────────────
+   Sits at the end of the #tagBar alongside the regular tag chips.
+   Calls insertNewline() so users can create line breaks in the
+   Outlook body without clicking back out of the taskpane.
+   Uses a neutral grey palette to distinguish it from data tags
+   (purple) and smart tags (green) — it's a structural action,
+   not a content placeholder.
+   ─────────────────────────────────────────────────────────────── */
+.tag.tag-newline {
+  background: #F0EFEF;          /* light neutral grey background            */
+  border: 1px solid #D4D2D0;   /* subtle grey border                       */
+  color: #5A5858;               /* medium grey text                         */
+}
+.tag.tag-newline:hover {
+  background: #E4E2E0;
+  border-color: #B8B6B4;
+  color: #3A3838;
+}
+
 /* ─── Status Log ──────────────────────────────────────────────────
    Dark terminal-style scrollable log box shown in the Sending tab
    to display real-time send progress and errors.
