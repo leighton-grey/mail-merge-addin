@@ -68,9 +68,9 @@
        matching .tab-pane using data-tab attribute matching.
        ARIA roles make this accessible to screen readers.         -->
   <div class="tab-bar" role="tablist">
-    <button class="tab-btn active" data-tab="recipients" role="tab" aria-selected="true">👥 Recipients</button>
-    <button class="tab-btn" data-tab="compose"    role="tab" aria-selected="false">✏️ Compose</button>
-    <button class="tab-btn" data-tab="options"    role="tab" aria-selected="false">⚙️ Options</button>
+    <button class="tab-btn active" data-tab="audience" role="tab" aria-selected="true">Audience</button>
+    <button class="tab-btn" data-tab="compose"    role="tab" aria-selected="false">Compose</button>
+    <button class="tab-btn" data-tab="options"    role="tab" aria-selected="false">Options</button>
   </div>
 
   <!-- ── Scrollable content area ───────────────────────────────────
@@ -80,7 +80,7 @@
   <div class="tab-content-wrap">
 
     <!-- Tab: Recipients -->
-    <div id="tab-recipients" class="tab-pane">
+    <div id="tab-audience" class="tab-pane">
 
           <!-- Getting started banner — hidden by default, shown via JS when CSV is empty -->
       <div id="gettingStartedBanner" class="getting-started-banner hidden">
@@ -206,51 +206,7 @@
         <p class="hint">Upload a .csv or .txt file with one email address per line. Any address in this list will be silently skipped during the merge.</p>
       </div>
 
-      <!-- Attachments -->
-      <div class="section">
-        <label class="label">Attachments</label>
-        <p class="sublabel">Shared <span class="hint-inline">(all recipients)</span></p>
-        <div class="attachment-row">
-          <button class="btn-secondary" id="uploadAttachmentBtn">📎 Add files</button>
-          <!-- Hidden file input; opened by uploadAttachmentBtn -->
-          <input type="file" id="attachmentFileInput" multiple class="hidden" />
-          <!-- Shows count of loaded files; updated by loadSharedAttachments() -->
-          <span id="attachmentLabel" class="attachment-label">None</span>
-          <!-- Hidden until shared attachments loaded -->
-          <button class="btn-icon hidden" id="clearSharedAttachmentsBtn" title="Clear all attachments">✕</button>
-        </div>
-        <p class="hint">Max 3 MB per file.</p>
-
-        <div class="attachment-subsection">
-          <p class="sublabel">Per-recipient <span class="hint-inline">(matched by filename)</span></p>
-          <div class="attachment-row">
-            <button class="btn-secondary" id="uploadPerRecipientBtn">📁 Load files</button>
-            <!-- Hidden file input; opened by uploadPerRecipientBtn -->
-            <input type="file" id="perRecipientFilesInput" multiple class="hidden" />
-            <!-- Shows count; updated by loadPerRecipientFiles() -->
-            <span id="perRecipientLabel" class="attachment-label">None loaded</span>
-            <!-- Hidden until per-recipient files loaded -->
-            <button class="btn-icon hidden" id="clearPerRecipientBtn" title="Clear all">✕</button>
-          </div>
-          <p class="hint">Add <code>attachment</code> column to CSV with exact filename. Falls back to shared if no match.</p>
-        </div>
-
-        <div class="attachment-subsection">
-          <p class="sublabel">Inline images <span class="hint-inline">(CID-embedded)</span></p>
-          <div class="attachment-row">
-            <button class="btn-secondary" id="uploadInlineImagesBtn">🖼 Load images</button>
-            <!-- Hidden file input; opened by uploadInlineImagesBtn -->
-            <input type="file" id="inlineImagesInput" multiple accept="image/*" class="hidden" />
-            <!-- Shows count; updated by loadInlineImages() -->
-            <span id="inlineImagesLabel" class="attachment-label">None loaded</span>
-            <!-- Hidden until inline images loaded -->
-            <button class="btn-icon hidden" id="clearInlineImagesBtn" title="Clear inline images">✕</button>
-          </div>
-          <p class="hint">Reference in HTML body as <code>&lt;img src="cid:filename.png"&gt;</code>.</p>
-        </div>
-      </div>
-
-    </div><!-- /tab-recipients -->
+    </div><!-- /tab-audience -->
 
     <!-- Tab: Compose -->
     <div id="tab-compose" class="tab-pane hidden">
@@ -310,6 +266,12 @@
         <div id="tagBar" class="tag-bar">
           <!-- data-tag holds the token to insert; tabindex & role make it keyboard/screen-reader accessible -->
           <span class="tag" data-tag="{{first_name}}" tabindex="0" role="button" aria-label="Insert first_name token"><span class="tag-label">{{first_name}}</span></span>
+          <!-- New line button sits next to {{first_name}} — the most common place users need a
+               line break after inserting a greeting. Clicking a tag moves focus to the taskpane,
+               so the user can't just press Enter in the Outlook body; this button calls
+               insertNewline() via setSelectedDataAsync to insert a line break without switching windows.
+               Works in both Body and Subject modes (Subject shows a guidance toast instead). -->
+          <span class="tag tag-newline" id="insertNewlineBtn" tabindex="0" role="button" aria-label="Insert new line into body" title="Insert a new line (↵) at cursor in body"><span class="tag-label">↵ New line</span></span>
           <span class="tag" data-tag="{{last_name}}"  tabindex="0" role="button" aria-label="Insert last_name token"><span class="tag-label">{{last_name}}</span></span>
           <span class="tag" data-tag="{{email}}"      tabindex="0" role="button" aria-label="Insert email token"><span class="tag-label">{{email}}</span></span>
           <span class="tag" data-tag="{{company}}"    tabindex="0" role="button" aria-label="Insert company token"><span class="tag-label">{{company}}</span></span>
@@ -318,11 +280,6 @@
           <span class="tag tag-smart" data-tag="{{greeting_line}}" tabindex="0" role="button" aria-label="Insert greeting_line token"><span class="tag-label">{{greeting_line}}</span></span>
           <span class="tag tag-smart" data-tag="{{today}}"         tabindex="0" role="button" aria-label="Insert today token"><span class="tag-label">{{today}}</span></span>
           <span class="tag tag-smart" data-tag="{{now}}"           tabindex="0" role="button" aria-label="Insert now token"><span class="tag-label">{{now}}</span></span>
-          <!-- New line button — clicking a tag chip moves focus to the taskpane so the user
-               can't press Enter in the Outlook body to create a new line. This button calls
-               insertNewline() which sends a line-break character via setSelectedDataAsync,
-               letting the user build multi-line templates without switching windows. -->
-          <span class="tag tag-newline" id="insertNewlineBtn" tabindex="0" role="button" aria-label="Insert new line into body" title="Insert a new line (↵) at cursor in body"><span class="tag-label">↵ New line</span></span>
         </div>
 
         <!-- Advanced: greeting format (collapsed) -->
@@ -378,6 +335,41 @@
           <button class="btn-secondary" id="loadBodyFromTemplateBtn">📋 Load body from template</button>
         </div>
         <p class="hint">Templates save everything: subject, body, reply-to, and all send options. Load a template to restore your full setup in one click.</p>
+      </div>
+
+      <!-- Attachments — part of composition: what gets sent with every email -->
+      <div class="section">
+        <label class="label">Attachments</label>
+        <p class="sublabel">Shared <span class="hint-inline">(all recipients)</span></p>
+        <div class="attachment-row">
+          <button class="btn-secondary" id="uploadAttachmentBtn">📎 Add files</button>
+          <input type="file" id="attachmentFileInput" multiple class="hidden" />
+          <span id="attachmentLabel" class="attachment-label">None</span>
+          <button class="btn-icon hidden" id="clearSharedAttachmentsBtn" title="Clear all attachments">✕</button>
+        </div>
+        <p class="hint">Max 3 MB per file.</p>
+
+        <div class="attachment-subsection">
+          <p class="sublabel">Per-recipient <span class="hint-inline">(matched by filename)</span></p>
+          <div class="attachment-row">
+            <button class="btn-secondary" id="uploadPerRecipientBtn">📁 Load files</button>
+            <input type="file" id="perRecipientFilesInput" multiple class="hidden" />
+            <span id="perRecipientLabel" class="attachment-label">None loaded</span>
+            <button class="btn-icon hidden" id="clearPerRecipientBtn" title="Clear all">✕</button>
+          </div>
+          <p class="hint">Add <code>attachment</code> column to CSV with exact filename. Falls back to shared if no match.</p>
+        </div>
+
+        <div class="attachment-subsection">
+          <p class="sublabel">Inline images <span class="hint-inline">(CID-embedded)</span></p>
+          <div class="attachment-row">
+            <button class="btn-secondary" id="uploadInlineImagesBtn">🖼 Load images</button>
+            <input type="file" id="inlineImagesInput" multiple accept="image/*" class="hidden" />
+            <span id="inlineImagesLabel" class="attachment-label">None loaded</span>
+            <button class="btn-icon hidden" id="clearInlineImagesBtn" title="Clear inline images">✕</button>
+          </div>
+          <p class="hint">Reference in HTML body as <code>&lt;img src="cid:filename.png"&gt;</code>.</p>
+        </div>
       </div>
 
     </div><!-- /tab-compose -->
@@ -555,7 +547,7 @@
             <div id="optoutList" class="optout-list-box"></div>
             <div style="display:flex;gap:6px;">
               <button id="optoutImportBtn" class="btn-secondary">Import from CSV column</button>
-              <button id="optoutClearBtn" class="btn-secondary btn-danger">Clear all</button>
+              <button id="optoutClearBtn" class="btn-danger-sm">Clear all</button>
             </div>
             <div style="font-size:11px;color:var(--text-muted);margin-top:4px;" id="optoutCount">0 addresses</div>
           </div>

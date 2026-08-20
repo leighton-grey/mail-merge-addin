@@ -2855,8 +2855,10 @@ function insertTag(tag, forceSubject = false) {
     const start = input.selectionStart;
     const end   = input.selectionEnd;
     const value = input.value;
-    input.value = value.slice(0, start) + tag + value.slice(end);
-    const newCursor = start + tag.length;
+    // Append a trailing space so the next tag or typed word is separated automatically.
+    const tagWithSpace = tag + " ";
+    input.value = value.slice(0, start) + tagWithSpace + value.slice(end);
+    const newCursor = start + tagWithSpace.length;
     input.setSelectionRange(newCursor, newCursor);
 
     // Fire "input" so lsSet() persists the value and the 400 ms push
@@ -2879,7 +2881,8 @@ function insertTag(tag, forceSubject = false) {
         log(`Could not read subject: ${getResult.error.message}`, "error");
         return;
       }
-      const newSubject = getResult.value + tag;
+      // Trailing space separates consecutive tags without manual typing.
+      const newSubject = getResult.value + tag + " ";
       Office.context.mailbox.item.subject.setAsync(newSubject, (setResult) => {
         if (setResult.status !== Office.AsyncResultStatus.Succeeded) {
           log(`Failed to set subject: ${setResult.error.message}`, "error");
@@ -2903,8 +2906,11 @@ function insertTag(tag, forceSubject = false) {
     // supported; HTML works on Windows.
     const isMac = Office.context.platform === Office.PlatformType.Mac;
     const coercionType = isMac ? Office.CoercionType.Text : Office.CoercionType.Html;
+    // Append a trailing space so consecutive tag clicks insert separated tokens
+    // (e.g. "{{first_name}} {{last_name}}") without the user needing to type a space.
+    // The user can backspace over the space if not needed.
     Office.context.mailbox.item.body.setSelectedDataAsync(
-      tag,
+      tag + " ",
       { coercionType },
       (result) => {
         if (result.status !== Office.AsyncResultStatus.Succeeded) {
@@ -4019,7 +4025,11 @@ function renderPreviewTable(rows) {
   // Row 2: Filter button on its own line below, left-aligned under "Preview".
   let html = '<div style="margin-bottom:4px;">' +
     '<div style="display:flex;align-items:center;gap:6px;">' +
-    '<label class="label" style="margin:0;">Preview (rows ' + (previewTablePage * PREVIEW_PAGE_SIZE + 1) + '–' + Math.min((previewTablePage + 1) * PREVIEW_PAGE_SIZE, rows.length) + ' of ' + rows.length + ')</label>' +
+    // Label: show total count when everything fits on one page; show a range only when paging.
+    // "Preview — 6 recipients" is clearer than "Preview (rows 1–6 of 6)".
+    '<label class="label" style="margin:0;">Preview — ' + (rows.length <= PREVIEW_PAGE_SIZE
+      ? rows.length + ' recipient' + (rows.length !== 1 ? 's' : '')
+      : (previewTablePage * PREVIEW_PAGE_SIZE + 1) + '–' + Math.min((previewTablePage + 1) * PREVIEW_PAGE_SIZE, rows.length) + ' of ' + rows.length) + '</label>' +
     '<button class="btn-secondary btn-edit-table" id="openEditTableBtn">✏ Edit table</button>' +
     '</div>' +
     '<div style="margin-top:4px;">' +

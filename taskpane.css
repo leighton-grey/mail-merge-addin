@@ -73,7 +73,30 @@
   --shadow:        0 4px 16px rgba(83,74,183,0.13), 0 1px 4px rgba(0,0,0,0.06);
   --shadow-lg:     0 10px 32px rgba(83,74,183,0.18), 0 2px 8px rgba(0,0,0,0.08);
 
-  /* ── Motion ──────────────────────────────────────────────
+  /* ── Aliases (backwards-compat shims) ───────────────────────
+     Map shorthand names used in component rules to their
+     canonical tokens above, so no variable is ever undefined.  */
+  --hover:         var(--bg-hover);   /* .tag-target-btn:hover uses --hover */
+  --text-main:     var(--text);       /* .toast default color uses --text-main */
+
+  /* ── Header gradient stops (tokenised for easy rebranding) ──
+     The header bar uses a 3-stop purple gradient. Keeping stops
+     as tokens means a palette change needs only this one edit.  */
+  --header-grad-start:  #6C62D4;
+  --header-grad-mid:    #534AB7;
+  --header-grad-end:    #3D35A0;
+
+  /* ── Newline tag palette ─────────────────────────────────────
+     The ↵ New line chip uses neutral grey to distinguish it
+     from data tags (purple) and smart tags (green).             */
+  --tag-nl-bg:      #F0EFEF;
+  --tag-nl-border:  #D4D2D0;
+  --tag-nl-color:   #5A5858;
+  --tag-nl-bg-hov:  #E4E2E0;
+  --tag-nl-brd-hov: #B8B6B4;
+  --tag-nl-col-hov: #3A3838;
+
+  /* ── Motion ──────────────────────────────────────────────────
      All interactive transitions share the same duration and
      easing curve so the UI feels consistently snappy.
      cubic-bezier(0.4,0,0.2,1) is the Material "standard" curve
@@ -132,7 +155,7 @@ body {
    ─────────────────────────────────────────────────────────────── */
 .header {
   /* 3-stop purple gradient matching the accent palette */
-  background: linear-gradient(135deg, #6C62D4 0%, #534AB7 45%, #3D35A0 100%);
+  background: linear-gradient(135deg, var(--header-grad-start) 0%, var(--header-grad-mid) 45%, var(--header-grad-end) 100%);
   color: #fff;
   padding: 10px 14px;
   margin: 0;
@@ -140,7 +163,7 @@ body {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
-  border-radius: 0 0 16px 16px;  /* flush top, rounded bottom corners */
+  border-radius: 16px 16px 16px 16px;  /* rounded on all four corners */
   box-shadow: 0 4px 16px rgba(61,53,160,0.28);
 }
 
@@ -429,8 +452,9 @@ body {
   cursor: not-allowed;
 }
 
-/* Preview — charcoal/black gradient pill at rest, morphs to orange
-   on hover so it visually connects to the brand identity.          */
+/* Preview — charcoal/near-black gradient pill. Stays charcoal on hover
+   (lighter shade + glow) so it's never mistaken for the orange primary
+   Run button. Identity stays consistent: dark = preview action.          */
 .btn-preview {
   padding: 7px 16px;
   background: linear-gradient(135deg, #3A3A3C 0%, #1C1C1E 100%);
@@ -448,8 +472,9 @@ body {
 }
 
 .btn-preview:hover {
-  background: linear-gradient(135deg, var(--brand-orange) 0%, var(--brand-orange-dark) 100%);
-  box-shadow: 0 4px 14px var(--brand-orange-glow);
+  /* Lighter charcoal on hover — visually distinct from the orange primary */
+  background: linear-gradient(135deg, #525254 0%, #3A3A3C 100%);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.32);
   transform: translateY(-1px);
 }
 
@@ -510,6 +535,29 @@ body {
 }
 .btn-danger:active { transform: translateY(0); }
 .btn-danger:disabled { background: #C8C6C4; box-shadow: none; cursor: not-allowed; }
+
+/* Compact danger pill — same red identity, smaller footprint.
+   Used for inline destructive actions (e.g. "Clear all" in opt-out list)
+   that sit beside other small controls, not as a full-width CTA.     */
+.btn-danger-sm {
+  padding: 5px 12px;
+  font-size: 12px;
+  background: linear-gradient(135deg, #E03035 0%, var(--danger) 100%);
+  color: #fff;
+  border: none;
+  border-radius: 99px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(196,37,42,0.22);
+  transition: background var(--transition), box-shadow var(--transition), transform var(--transition);
+}
+.btn-danger-sm:hover {
+  background: linear-gradient(135deg, #EE3540 0%, #A4262C 100%);
+  transform: translateY(-1px);
+}
+.btn-danger-sm:active { transform: translateY(0); }
 
 /* Small utility pill — used for compact actions like "Add tag",
    "Remove", or row-level controls inside tables.                  */
@@ -845,14 +893,14 @@ body {
    not a content placeholder.
    ─────────────────────────────────────────────────────────────── */
 .tag.tag-newline {
-  background: #F0EFEF;          /* light neutral grey background            */
-  border: 1px solid #D4D2D0;   /* subtle grey border                       */
-  color: #5A5858;               /* medium grey text                         */
+  background: var(--tag-nl-bg);
+  border: 1px solid var(--tag-nl-border);
+  color: var(--tag-nl-color);
 }
 .tag.tag-newline:hover {
-  background: #E4E2E0;
-  border-color: #B8B6B4;
-  color: #3A3838;
+  background: var(--tag-nl-bg-hov);
+  border-color: var(--tag-nl-brd-hov);
+  color: var(--tag-nl-col-hov);
 }
 
 /* ─── Status Log ──────────────────────────────────────────────────
@@ -1086,7 +1134,8 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   margin-top: 8px;
-  overflow: hidden;  /* clip collapsed body inside the rounded border */
+  margin-bottom: 4px;  /* breathing room between stacked accordions */
+  overflow: hidden;    /* clip collapsed body inside the rounded border */
   box-shadow: var(--shadow-sm);
 }
 
@@ -1360,7 +1409,7 @@ body {
 }
 .edit-col-header-input:focus {
   background: var(--accent-bg);
-  border-radius: 3px;
+  border-radius: 4px;  /* was 3px outlier — now closer to design system */
   padding: 2px 4px;
 }
 
@@ -1567,10 +1616,10 @@ body {
 }
 .toast-close:hover { opacity: 1; }
 
-.toast-info    { border-left-color: var(--accent);  background: var(--accent-bg); }
-.toast-success { border-left-color: #27AE60;         background: #F0FFF4; }
-.toast-warning { border-left-color: #F2994A;         background: #FFF8F0; }
-.toast-error   { border-left-color: #EB5757;         background: #FFF5F5; }
+.toast-info    { border-left-color: var(--accent);   background: var(--accent-bg);  }
+.toast-success { border-left-color: var(--success);  background: var(--success-bg); }
+.toast-warning { border-left-color: var(--warning);  background: var(--warning-bg); }
+.toast-error   { border-left-color: var(--danger);   background: var(--danger-bg);  }
 
 .toast-hide {
   animation: toastSlideOut 0.2s ease-in forwards;
@@ -1975,8 +2024,7 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
    ─────────────────────────────────────────────────────────────── */
 .footer-step1-row {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;  /* label+button on top row, select below, test button below that */
   gap: 6px;
   background: linear-gradient(135deg, rgba(245,130,32,0.13) 0%, rgba(245,130,32,0.05) 60%, rgba(255,255,255,0.6) 100%);
   border: 1.5px solid rgba(245,130,32,0.35);
@@ -1997,16 +2045,17 @@ details[open] > .hint-advanced-toggle::before { transform: rotate(90deg); }
   /* flex-shrink: 0 removed — allows label to participate in wrapping on narrow panes */
 }
 
-/* Compact <select> for choosing which recipient to test-send to */
+/* Row-selector <select> — full width so long email addresses aren't truncated */
 .step1-row-select {
   font-size: 11px;
-  padding: 2px 4px;
+  padding: 2px 6px;
   border: 1px solid rgba(245,130,32,0.35);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);  /* matches design system (was 8px outlier) */
   background: #fff;
   color: var(--text);
   font-family: inherit;
-  max-width: 80px;   /* keep the select narrow so the button has room to breathe */
+  width: 100%;       /* stretch to fill the footer card — more content is visible */
+  box-sizing: border-box;
 }
 
 /* Compact "Check errors" button — inline beside Row 1 select */
